@@ -287,41 +287,44 @@ router.get('/google-callback', async (req, res) => {
     console.log('✅ Access token obtained');
     const { accessToken, refreshToken } = tokenResult;
 
-    // Return success page with data for frontend to capture
+    // Return a friendly success page. We deliberately do NOT print the raw
+    // tokens on screen — they're sensitive and only confuse non-technical users.
     const htmlResponse = `
     <html>
       <head>
         <title>Google Drive Connected</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
         <style>
-          body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-          .success { color: green; font-size: 24px; margin: 20px 0; }
-          .token-box { background: #f0f0f0; padding: 20px; margin: 20px 0; border-radius: 5px; text-align: left; }
-          code { background: #ddd; padding: 10px; display: block; margin: 10px 0; word-break: break-all; }
+          body { font-family: -apple-system, Segoe UI, Arial, sans-serif; text-align: center;
+                 padding: 40px 24px; color: #1f2937; background: #faf7f2; }
+          .card { max-width: 420px; margin: 40px auto; background: #fff; padding: 32px 26px;
+                  border-radius: 14px; box-shadow: 0 10px 40px rgba(0,0,0,0.08); }
+          h1 { font-size: 1.4rem; margin: 0 0 12px; }
+          p { font-size: 0.98rem; line-height: 1.55; color: #4b5563; margin: 8px 0; }
+          .ok { color: #047857; font-weight: 700; }
         </style>
       </head>
       <body>
-        <h1>✅ Google Drive Successfully Connected!</h1>
-        <p>Your Google Drive account has been authenticated.</p>
-        <p>You can now close this window and return to the app.</p>
-        <div class="token-box">
-          <p><strong>Access Token:</strong></p>
-          <code>${accessToken}</code>
-          <p><strong>Refresh Token:</strong></p>
-          <code>${refreshToken || 'N/A'}</code>
+        <div class="card">
+          <h1 class="ok">Google Drive connected</h1>
+          <p>Your Google Drive is now linked to EventFlow.</p>
+          <p>From now on, photos your guests upload will be saved straight into your own
+             Google Drive — never on our servers.</p>
+          <p>This window will close on its own. If it doesn't, you can close it and go
+             back to EventFlow.</p>
         </div>
         <script>
-          // Store tokens in session storage for the frontend to pick up
+          // Hand the tokens back to the app, then close. Tokens stay out of view.
           sessionStorage.setItem('googleAccessToken', '${accessToken}');
           sessionStorage.setItem('googleRefreshToken', '${refreshToken || ''}');
-          
-          // Notify parent window if opened from popup
+
           if (window.opener) {
             window.opener.postMessage({
               type: 'google-auth-success',
               accessToken: '${accessToken}',
               refreshToken: '${refreshToken || ''}'
             }, '*');
-            window.close();
+            setTimeout(function () { window.close(); }, 1500);
           }
         </script>
       </body>

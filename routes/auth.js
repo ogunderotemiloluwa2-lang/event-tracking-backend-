@@ -17,19 +17,27 @@ if (!process.env.JWT_SECRET) {
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
+// Normalize emails so sign-in is not broken by capitalization/whitespace
+// (mobile keyboards often auto-capitalize the first letter of an email).
+const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
+const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 // Register
 router.post('/register', async (req, res) => {
   try {
     const { name, email, password, role, phone, organization } = req.body;
     if (!name || !email || !password) return res.status(400).json({ message: 'Missing fields' });
 
-    const existing = await User.findOne({ email });
+    const normalizedEmail = normalizeEmail(email);
+
+    // Case-insensitive existence check so "John@x.com" and "john@x.com" don't both register
+    const existing = await User.findOne({ email: new RegExp(`^${escapeRegex(normalizedEmail)}$`, 'i') });
     if (existing) return res.status(400).json({ message: 'Email already registered' });
 
     const salt = await bcrypt.genSalt(10);
     const hash = await bcrypt.hash(password, salt);
 
-    const user = new User({ name, email, password: hash, role, phone, organization });
+    const user = new User({ name, email: normalizedEmail, password: hash, role, phone, organization });
     await user.save();
 
     const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
@@ -46,7 +54,9 @@ router.post('/login', async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ message: 'Missing fields' });
 
-    const user = await User.findOne({ email });
+    // Case-insensitive lookup so existing accounts saved with any capitalization still match
+    const normalizedEmail = normalizeEmail(email);
+    const user = await User.findOne({ email: new RegExp(`^${escapeRegex(normalizedEmail)}$`, 'i') });
     if (!user) return res.status(400).json({ message: 'Invalid credentials' });
 
     const isMatch = await bcrypt.compare(password, user.password);

@@ -7,6 +7,7 @@ const attendeeSchema = new mongoose.Schema({
   },
   email: {
     type: String,
+    
     required: true
   },
   phone: String,

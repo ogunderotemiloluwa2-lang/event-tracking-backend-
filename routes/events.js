@@ -31,8 +31,12 @@ router.get('/:id', async (req, res) => {
 // Create event
 router.post('/', async (req, res) => {
   try {
-    const { title, description, date, location, capacity, expectedAttendees, organizerId, googleDriveFolderLink } = req.body;
-    
+    const {
+      title, description, date, startTime, endTime, location, venue,
+      timeZone, dressCode, ageRestriction, additionalInfo,
+      capacity, expectedAttendees, organizerId, googleDriveFolderLink
+    } = req.body;
+
     if (!title || !date || !organizerId) {
       return res.status(400).json({ message: 'Title, date, and organizerId are required' });
     }
@@ -60,7 +64,14 @@ router.post('/', async (req, res) => {
       title,
       description,
       date,
+      startTime,
+      endTime,
       location,
+      venue,
+      timeZone,
+      dressCode,
+      ageRestriction,
+      additionalInfo,
       capacity,
       expectedAttendees,
       createdBy: organizerId,

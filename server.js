@@ -2,7 +2,6 @@ require('dotenv').config();
 const dns = require('dns');
 const express = require('express');
 const cors = require('cors');
-const multer = require('multer');
 const connectDB = require('./config/db');
 
 // Force DNS to use Google's servers for reliable MongoDB SRV resolution
@@ -11,17 +10,10 @@ dns.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1', '1.0.0.1']);
 
 const app = express();
 
-// Configure multer for file uploads
-const upload = multer({ 
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
-});
-
 // Middleware
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(upload.single('file')); // Handle single file uploads
 
 // Routes
 app.use('/api/events', require('./routes/events'));

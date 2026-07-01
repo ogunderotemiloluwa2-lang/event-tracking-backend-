@@ -57,13 +57,35 @@ function getAuthorizationUrl() {
  * Build an OAuth2 client authenticated as the organizer.
  * Uses the stored refresh token so a fresh access token is minted
  * automatically (access tokens expire after ~1 hour).
+ *
+ * When googleapis refreshes the token internally, the 'tokens' event
+ * fires so we can persist the new access token back to the database.
  */
-function getAuthenticatedClient({ accessToken, refreshToken }) {
+function getAuthenticatedClient({ accessToken, refreshToken, userId }) {
   const oauth2Client = getOAuth2Client();
   oauth2Client.setCredentials({
     access_token: accessToken || undefined,
     refresh_token: refreshToken || undefined
   });
+
+  // Persist refreshed tokens so uploads keep working after the 1-hour expiry
+  if (userId && refreshToken) {
+    oauth2Client.on('tokens', async (tokens) => {
+      try {
+        const User = require('../models/User');
+        const update = {};
+        if (tokens.access_token) update.googleAccessToken = tokens.access_token;
+        // Google only sends a new refresh_token on the very first grant or
+        // when the user re-consents — but if we get one, save it.
+        if (tokens.refresh_token) update.googleRefreshToken = tokens.refresh_token;
+        await User.findByIdAndUpdate(userId, update);
+        console.log('🔄 Google Drive token refreshed and saved for user', userId);
+      } catch (err) {
+        console.error('Failed to save refreshed Google token:', err.message);
+      }
+    });
+  }
+
   return oauth2Client;
 }
 
@@ -110,6 +132,7 @@ async function uploadPhotoToGoogleDrive({
   fileName,
   accessToken,
   refreshToken,
+  userId,
   mimeType = 'image/jpeg',
   uploaderName = 'Attendee',
   photoCaption = ''
@@ -120,7 +143,7 @@ async function uploadPhotoToGoogleDrive({
     console.log('   File name:', fileName);
     console.log('   Uploader:', uploaderName);
 
-    const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken });
+    const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, userId });
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
     const fileMetadata = {
@@ -159,11 +182,18 @@ async function uploadPhotoToGoogleDrive({
     };
 
   } catch (error) {
-    console.error('❌ Google Drive upload error:', error.message);
+    // Google returns the useful detail nested under response.data.error — surface
+    // it so the caller (and ultimately the guest) sees the real reason.
+    const googleErr = error?.response?.data?.error;
+    const detail = (googleErr && (googleErr.message || googleErr)) ||
+      (Array.isArray(error?.errors) && error.errors[0]?.message) ||
+      error.message;
+    console.error('❌ Google Drive upload error:', detail);
+    console.error('   Full Google error:', JSON.stringify(error?.response?.data || error.message));
     return {
       success: false,
-      error: error.message,
-      code: error.code || 'UNKNOWN_ERROR'
+      error: detail,
+      code: error.code || googleErr?.status || 'UNKNOWN_ERROR'
     };
   }
 }
@@ -171,8 +201,8 @@ async function uploadPhotoToGoogleDrive({
 /**
  * List photos from the organizer's Drive folder, authenticated as them.
  */
-async function getPhotosFromGoogleDrive({ folderId, accessToken, refreshToken }) {
-  const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken });
+async function getPhotosFromGoogleDrive({ folderId, accessToken, refreshToken, userId }) {
+  const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, userId });
   const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
   const response = await drive.files.list({

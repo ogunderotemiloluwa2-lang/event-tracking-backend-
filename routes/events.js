@@ -5,7 +5,14 @@ const Attendee = require('../models/Attendee');
 const User = require('../models/User');
 const QRCode = require('qrcode');
 const nodemailer = require('nodemailer');
+const multer = require('multer');
 const { uploadPhotoToGoogleDrive, getPhotosFromGoogleDrive, extractFolderId } = require('../utils/googleDrive');
+
+// Local multer for photo uploads only (not applied globally)
+const photoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+});
 
 // Get all events
 router.get('/', async (req, res) => {
@@ -297,7 +304,7 @@ router.post('/send-reminders', async (req, res) => {
 });
 
 // Upload photo DIRECTLY to Google Drive (NO server storage)
-router.post('/:eventId/photos', async (req, res) => {
+router.post('/:eventId/photos', photoUpload.single('file'), async (req, res) => {
   try {
     const { eventId } = req.params;
     const { passId, uploaderName, uploaderEmail, photoCaption } = req.body;
@@ -356,15 +363,27 @@ router.post('/:eventId/photos', async (req, res) => {
       fileName: file.originalname,
       accessToken: organizer.googleAccessToken,
       refreshToken: organizer.googleRefreshToken,
+      userId: organizer._id,  // pass userId so refreshed tokens get saved
       mimeType: file.mimetype || 'image/jpeg',
       uploaderName,
       photoCaption
     });
 
     if (!uploadResult.success) {
+      // Give a human, actionable message for the most common Google failures.
+      const raw = String(uploadResult.error || '');
+      let friendly = `Google Drive rejected the upload: ${raw}`;
+      if (/invalid credentials|invalid_grant|unauthorized|401/i.test(raw)) {
+        friendly = 'Google Drive access has expired. Ask the organizer to click "Connect Google Drive" again on their dashboard, then retry.';
+      } else if (/insufficient|forbidden|403|permission/i.test(raw)) {
+        friendly = 'The organizer\'s Google account can\'t write to this folder. Make sure the folder was created in the organizer\'s own Drive and shared with edit access.';
+      } else if (/not found|404/i.test(raw)) {
+        friendly = 'The Google Drive folder for this event could not be found. Ask the organizer to re-check the folder link.';
+      }
       return res.status(500).json({
-        message: 'Failed to upload photo to Google Drive',
-        error: uploadResult.error
+        message: friendly,
+        error: uploadResult.error,
+        code: uploadResult.code
       });
     }
 
@@ -433,7 +452,8 @@ async function listEventPhotos(req, res) {
     const photos = await getPhotosFromGoogleDrive({
       folderId: event.googleDriveFolderId,
       accessToken: organizer.googleAccessToken,
-      refreshToken: organizer.googleRefreshToken
+      refreshToken: organizer.googleRefreshToken,
+      userId: organizer._id
     });
 
     console.log(`✅ Retrieved ${photos.length} photos from Google Drive`);

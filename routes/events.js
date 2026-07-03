@@ -201,6 +201,17 @@ router.get('/by-passid/:passId', async (req, res) => {
   }
 });
 
+// Get all events a user has joined as attendee
+router.get('/by-user/:userId', async (req, res) => {
+  try {
+    const events = await Event.find({ 'attendees.userId': req.params.userId })
+      .populate('createdBy', 'name email organization');
+    res.json(events);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // Join event by passId
 router.post('/join-by-passid', async (req, res) => {
   try {
@@ -228,6 +239,31 @@ router.post('/join-by-passid', async (req, res) => {
 
     await event.save();
     res.json({ message: 'Successfully joined event', event });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Leave event (attendee removes themselves)
+router.post('/leave-by-passid', async (req, res) => {
+  try {
+    const { passId, userId } = req.body;
+    
+    if (!passId || !userId) {
+      return res.status(400).json({ message: 'passId and userId are required' });
+    }
+
+    const event = await Event.findOne({ passId });
+    if (!event) return res.status(404).json({ message: 'Event not found' });
+
+    const attendeeIndex = event.attendees.findIndex(a => a.userId.toString() === userId);
+    if (attendeeIndex === -1) {
+      return res.status(404).json({ message: 'You are not registered for this event' });
+    }
+
+    event.attendees.splice(attendeeIndex, 1);
+    await event.save();
+    res.json({ message: 'Successfully left event' });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

@@ -233,21 +233,29 @@ async function uploadPhotoToGoogleDrive({
  * List photos from the organizer's Drive folder, authenticated as them.
  */
 async function getPhotosFromGoogleDrive({ folderId, accessToken, refreshToken, userId }) {
-  const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, userId });
-  await refreshAndPersistToken(oauth2Client, userId);
-  const drive = google.drive({ version: 'v3', auth: oauth2Client });
+  try {
+    const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, userId });
+    await refreshAndPersistToken(oauth2Client, userId);
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
-  const response = await drive.files.list({
-    q: `'${folderId}' in parents and mimeType contains 'image/' and trashed=false`,
-    spaces: 'drive',
-    fields: 'files(id, name, webViewLink, thumbnailLink, createdTime, size, properties)',
-    pageSize: 100,
-    orderBy: 'createdTime desc',
-    supportsAllDrives: true,
-    includeItemsFromAllDrives: true
-  });
+    const response = await drive.files.list({
+      q: `'${folderId}' in parents and mimeType contains 'image/' and trashed=false`,
+      spaces: 'drive',
+      fields: 'files(id, name, webViewLink, thumbnailLink, createdTime, size, properties)',
+      pageSize: 100,
+      orderBy: 'createdTime desc',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true
+    });
 
-  return response.data.files || [];
+    return response.data.files || [];
+  } catch (error) {
+    const googleErr = error?.response?.data?.error;
+    const detail = (googleErr && (googleErr.message || googleErr)) ||
+      error.message;
+    console.error('❌ Google Drive list error:', detail);
+    throw new Error(detail);
+  }
 }
 
 module.exports = {

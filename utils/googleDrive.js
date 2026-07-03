@@ -90,6 +90,31 @@ function getAuthenticatedClient({ accessToken, refreshToken, userId }) {
 }
 
 /**
+ * Explicitly refresh the access token and persist it.
+ * Call this BEFORE every Drive API call to ensure the token is fresh.
+ * Returns the fresh access token string, or null if refresh failed.
+ */
+async function refreshAndPersistToken(oauth2Client, userId) {
+  if (!oauth2Client.credentials?.refresh_token) {
+    console.warn('⚠️ No refresh token available — cannot refresh access token');
+    return null;
+  }
+  try {
+    const { credentials } = await oauth2Client.refreshAccessToken();
+    const freshToken = credentials.access_token;
+    if (freshToken && userId) {
+      const User = require('../models/User');
+      await User.findByIdAndUpdate(userId, { googleAccessToken: freshToken });
+      console.log('🔄 Access token explicitly refreshed and saved for user', userId);
+    }
+    return freshToken || null;
+  } catch (err) {
+    console.error('❌ Failed to refresh access token:', err.message);
+    return null;
+  }
+}
+
+/**
  * Get access token from authorization code
  */
 async function getAccessTokenFromCode(code) {
@@ -144,6 +169,12 @@ async function uploadPhotoToGoogleDrive({
     console.log('   Uploader:', uploaderName);
 
     const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, userId });
+
+    // Explicitly refresh the token before making the API call — the passive
+    // 'tokens' event doesn't always fire in time, causing "invalid authentication
+    // credentials" errors when the stored access token has expired.
+    await refreshAndPersistToken(oauth2Client, userId);
+
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
     const fileMetadata = {
@@ -203,6 +234,7 @@ async function uploadPhotoToGoogleDrive({
  */
 async function getPhotosFromGoogleDrive({ folderId, accessToken, refreshToken, userId }) {
   const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, userId });
+  await refreshAndPersistToken(oauth2Client, userId);
   const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
   const response = await drive.files.list({

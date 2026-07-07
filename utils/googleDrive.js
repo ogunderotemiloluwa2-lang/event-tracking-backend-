@@ -148,7 +148,6 @@ async function getAccessTokenFromCode(code) {
  * @param {string} opts.accessToken   - Organizer's access token (may be stale)
  * @param {string} opts.refreshToken  - Organizer's refresh token (preferred)
  * @param {string} [opts.mimeType]    - File mime type (defaults image/jpeg)
- * @param {string} [opts.uploaderName]
  * @param {string} [opts.photoCaption]
  */
 async function uploadPhotoToGoogleDrive({
@@ -159,14 +158,12 @@ async function uploadPhotoToGoogleDrive({
   refreshToken,
   userId,
   mimeType = 'image/jpeg',
-  uploaderName = 'Attendee',
   photoCaption = ''
 }) {
   try {
     console.log('📤 Uploading photo to organizer Google Drive...');
     console.log('   Folder ID:', folderId);
     console.log('   File name:', fileName);
-    console.log('   Uploader:', uploaderName);
 
     const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, userId });
 
@@ -180,9 +177,8 @@ async function uploadPhotoToGoogleDrive({
     const fileMetadata = {
       name: fileName,
       parents: [folderId],
-      description: `Uploaded by ${uploaderName} via EventFlow${photoCaption ? ': ' + photoCaption : ''}`,
+      description: `EventFlow photo${photoCaption ? ': ' + photoCaption : ''}`,
       properties: {
-        uploader: uploaderName,
         caption: photoCaption || '',
         eventPhoto: 'true'
       }

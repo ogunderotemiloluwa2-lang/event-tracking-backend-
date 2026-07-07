@@ -413,12 +413,11 @@ router.post('/send-reminders', authenticate, requireOrganizer, async (req, res) 
 router.post('/:eventId/photos', photoUpload.single('file'), async (req, res) => {
   try {
     const { eventId } = req.params;
-    const { passId, uploaderName, photoCaption } = req.body;
+    const { passId, photoCaption } = req.body;
     const file = req.file;
 
     console.log('\n📸 PHOTO UPLOAD REQUEST RECEIVED');
     console.log('   Event ID:', eventId);
-    console.log('   Uploader:', uploaderName);
     console.log('   File:', file?.originalname);
 
     if (!file) {
@@ -427,10 +426,6 @@ router.post('/:eventId/photos', photoUpload.single('file'), async (req, res) => 
 
     if (!eventId || !passId) {
       return res.status(400).json({ message: 'Event ID and Pass ID are required' });
-    }
-
-    if (!uploaderName) {
-      return res.status(400).json({ message: 'Uploader name is required' });
     }
 
     // Find event + its organizer (we upload AS the organizer)
@@ -471,7 +466,6 @@ router.post('/:eventId/photos', photoUpload.single('file'), async (req, res) => 
       refreshToken: organizer.googleRefreshToken,
       userId: organizer._id,  // pass userId so refreshed tokens get saved
       mimeType: file.mimetype || 'image/jpeg',
-      uploaderName,
       photoCaption
     });
 
@@ -502,8 +496,6 @@ router.post('/:eventId/photos', photoUpload.single('file'), async (req, res) => 
       message: 'Photo uploaded successfully to Google Drive!',
       photoId: uploadResult.fileId,
       fileName: uploadResult.fileName,
-      uploaderName: uploaderName,
-      uploaderEmail: uploaderEmail,
       fileSize: uploadResult.size,
       googleDriveFileId: uploadResult.fileId,
       googleDriveUrl: uploadResult.fileLink,
@@ -568,7 +560,6 @@ async function listEventPhotos(req, res) {
     const formattedPhotos = photos.map(photo => ({
       photoId: photo.id,
       fileName: photo.name,
-      uploaderName: photo.properties?.uploader || 'Unknown',
       photoCaption: photo.properties?.caption || '',
       uploadedAt: photo.createdTime,
       downloadUrl: photo.webViewLink,

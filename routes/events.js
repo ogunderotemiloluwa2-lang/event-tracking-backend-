@@ -413,7 +413,7 @@ router.post('/send-reminders', authenticate, requireOrganizer, async (req, res) 
 router.post('/:eventId/photos', photoUpload.single('file'), async (req, res) => {
   try {
     const { eventId } = req.params;
-    const { passId, uploaderName, uploaderEmail, photoCaption } = req.body;
+    const { passId, uploaderName, photoCaption } = req.body;
     const file = req.file;
 
     console.log('\n📸 PHOTO UPLOAD REQUEST RECEIVED');
@@ -429,8 +429,8 @@ router.post('/:eventId/photos', photoUpload.single('file'), async (req, res) => 
       return res.status(400).json({ message: 'Event ID and Pass ID are required' });
     }
 
-    if (!uploaderName || !uploaderEmail) {
-      return res.status(400).json({ message: 'Uploader name and email are required' });
+    if (!uploaderName) {
+      return res.status(400).json({ message: 'Uploader name is required' });
     }
 
     // Find event + its organizer (we upload AS the organizer)

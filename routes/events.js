@@ -7,7 +7,7 @@ const QRCode = require('qrcode');
 const nodemailer = require('nodemailer');
 const multer = require('multer');
 const { authenticate, requireOrganizer, sanitizeEvent, sanitizeEvents } = require('../middleware/auth');
-const { uploadPhotoToGoogleDrive, getPhotosFromGoogleDrive, extractFolderId } = require('../utils/googleDrive');
+const { uploadPhotoToGoogleDrive, getPhotosFromGoogleDrive, extractFolderId, verifyFolderWriteAccess } = require('../utils/googleDrive');
 
 // Local multer for photo uploads only (not applied globally)
 const photoUpload = multer({
@@ -72,6 +72,30 @@ router.post('/', authenticate, async (req, res) => {
         });
       }
       console.log('✅ Extracted Google Drive Folder ID:', googleDriveFolderId);
+
+      // Validate that the organizer can write to this folder
+      const organizer = await User.findById(organizerId);
+      if (organizer && (organizer.googleRefreshToken || organizer.googleAccessToken)) {
+        console.log('🔍 Validating folder write access...');
+        const validation = await verifyFolderWriteAccess({
+          folderId: googleDriveFolderId,
+          accessToken: organizer.googleAccessToken,
+          refreshToken: organizer.googleRefreshToken,
+          userId: organizerId
+        });
+
+        if (!validation.ok) {
+          return res.status(400).json({
+            message: 'Google Drive folder validation failed',
+            details: `The organizer's Google account can't write to this folder. Make sure the folder was created in YOUR OWN Google Drive (not shared by someone else). Then paste its link again.`,
+            error: validation.error,
+            code: validation.code
+          });
+        }
+        console.log('✅ Folder write access verified');
+      } else {
+        console.log('⚠️ Google Drive not connected — skipping folder validation. Photos will fail until Drive is connected.');
+      }
     }
     
     const event = new Event({
@@ -116,10 +140,31 @@ router.put('/:id', authenticate, requireOrganizer, async (req, res) => {
       return res.status(403).json({ message: 'You can only edit your own events.' });
     }
 
-    // If a new Drive folder link is provided, extract and store the ID server-side only
+    // If a new Drive folder link is provided, extract and validate
     if (req.body.googleDriveFolderLink) {
       const folderId = extractFolderId(req.body.googleDriveFolderLink);
       if (folderId) {
+        // Validate the folder is writable by the organizer
+        const organizer = await User.findById(req.user.id);
+        if (organizer && (organizer.googleRefreshToken || organizer.googleAccessToken)) {
+          console.log('🔍 Validating folder write access on update...');
+          const validation = await verifyFolderWriteAccess({
+            folderId,
+            accessToken: organizer.googleAccessToken,
+            refreshToken: organizer.googleRefreshToken,
+            userId: req.user.id
+          });
+
+          if (!validation.ok) {
+            return res.status(400).json({
+              message: 'Google Drive folder validation failed',
+              details: `This folder isn't writable by your account. Create a folder in YOUR OWN Google Drive and paste its link here.`,
+              error: validation.error,
+              code: validation.code
+            });
+          }
+          console.log('✅ Folder write access verified on update');
+        }
         event.googleDriveFolderId = folderId;
       }
     }

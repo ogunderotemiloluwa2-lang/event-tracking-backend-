@@ -254,6 +254,61 @@ async function getPhotosFromGoogleDrive({ folderId, accessToken, refreshToken, u
   }
 }
 
+/**
+ * Verify that the organizer can write to the specified Drive folder.
+ * Uploads a tiny, self-deleting probe file. If that works, the folder is
+ * writable. Returns { ok: true } or { ok: false, error: '...' }.
+ *
+ * @param {Object} opts
+ * @param {string} opts.folderId      - Destination Drive folder ID
+ * @param {string} opts.accessToken   - Organizer's access token (may be stale)
+ * @param {string} opts.refreshToken  - Organizer's refresh token
+ * @param {string} opts.userId        - Organizer's MongoDB _id (for token persistence)
+ */
+async function verifyFolderWriteAccess({ folderId, accessToken, refreshToken, userId }) {
+  try {
+    const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, userId });
+    await refreshAndPersistToken(oauth2Client, userId);
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
+    // Create a tiny probe file so we can test write permissions without
+    // relying solely on a metadata read (which doesn't prove write access).
+    const probe = await drive.files.create({
+      requestBody: {
+        name: '__eventflow_probe__',
+        parents: [folderId],
+        description: 'EventFlow permission probe — auto-deleted',
+      },
+      media: {
+        mimeType: 'text/plain',
+        body: Readable.from(Buffer.from('probe')),
+      },
+      fields: 'id',
+      supportsAllDrives: true,
+    });
+
+    // Immediately delete the probe file so the folder stays clean.
+    try {
+      await drive.files.delete({ fileId: probe.data.id, supportsAllDrives: true });
+    } catch (cleanupErr) {
+      console.warn('⚠️ Failed to clean up probe file:', cleanupErr.message);
+    }
+
+    return { ok: true };
+  } catch (error) {
+    const googleErr = error?.response?.data?.error;
+    const detail = (googleErr && (googleErr.message || googleErr)) ||
+      (Array.isArray(error?.errors) && error.errors[0]?.message) ||
+      error.message;
+
+    return {
+      ok: false,
+      error: detail,
+      code: error.code || googleErr?.status || 'UNKNOWN_ERROR'
+    };
+  }
+}
+
 module.exports = {
   extractFolderId,
   validateFolderLink,
@@ -262,5 +317,6 @@ module.exports = {
   getAuthenticatedClient,
   getAccessTokenFromCode,
   uploadPhotoToGoogleDrive,
-  getPhotosFromGoogleDrive
+  getPhotosFromGoogleDrive,
+  verifyFolderWriteAccess
 };

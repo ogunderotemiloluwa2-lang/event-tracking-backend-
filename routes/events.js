@@ -6,6 +6,7 @@ const User = require('../models/User');
 const QRCode = require('qrcode');
 const nodemailer = require('nodemailer');
 const multer = require('multer');
+const { authenticate, requireOrganizer, sanitizeEvent, sanitizeEvents } = require('../middleware/auth');
 const { uploadPhotoToGoogleDrive, getPhotosFromGoogleDrive, extractFolderId } = require('../utils/googleDrive');
 
 // Local multer for photo uploads only (not applied globally)
@@ -14,39 +15,45 @@ const photoUpload = multer({
   limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
 });
 
-// Get all events
+// Get all events (public — only non-sensitive fields)
 router.get('/', async (req, res) => {
   try {
-    const events = await Event.find().populate('attendees');
-    res.json(events);
+    const events = await Event.find().populate('createdBy', 'name email organization').populate('attendees');
+    // Strip all Google Drive data before sending to client
+    const safe = sanitizeEvents(events, null);
+    res.json(safe);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// Get event by ID
-router.get('/:id', async (req, res) => {
+// Get event by ID (authenticated — strips Drive data unless user is the organizer)
+router.get('/:id', authenticate, async (req, res) => {
   try {
-    const event = await Event.findById(req.params.id).populate('attendees');
+    const event = await Event.findById(req.params.id).populate('createdBy', 'name email organization').populate('attendees');
     if (!event) return res.status(404).json({ message: 'Event not found' });
-    res.json(event);
+    const safe = sanitizeEvent(event, req.user.id);
+    res.json(safe);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// Create event
-router.post('/', async (req, res) => {
+// Create event (authenticated)
+router.post('/', authenticate, async (req, res) => {
   try {
     const {
       title, description, date, startTime, endTime, location, venue,
       timeZone, dressCode, ageRestriction, additionalInfo,
-      capacity, expectedAttendees, organizerId, googleDriveFolderLink
+      capacity, expectedAttendees, googleDriveFolderLink
     } = req.body;
 
-    if (!title || !date || !organizerId) {
-      return res.status(400).json({ message: 'Title, date, and organizerId are required' });
+    if (!title || !date) {
+      return res.status(400).json({ message: 'Title and date are required' });
     }
+    
+    // Use the authenticated user's ID — never trust client-supplied organizerId
+    const organizerId = req.user.id;
     
     // Generate unique pass ID (8-character alphanumeric)
     const passId = Math.random().toString(36).substr(2, 8).toUpperCase();
@@ -90,44 +97,72 @@ router.post('/', async (req, res) => {
     });
 
     await event.save();
-    res.status(201).json(event);
+    // Strip Drive data from response
+    const safe = sanitizeEvent(event, req.user.id);
+    res.status(201).json(safe);
   } catch (error) {
     res.status(400).json({ message: error.message });
   }
 });
 
-// Update event
-router.put('/:id', async (req, res) => {
+// Update event (authenticated, organizer only)
+router.put('/:id', authenticate, requireOrganizer, async (req, res) => {
   try {
     const event = await Event.findById(req.params.id);
     if (!event) return res.status(404).json({ message: 'Event not found' });
 
+    // Only the event creator can update
+    if (event.createdBy.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'You can only edit your own events.' });
+    }
+
+    // If a new Drive folder link is provided, extract and store the ID server-side only
+    if (req.body.googleDriveFolderLink) {
+      const folderId = extractFolderId(req.body.googleDriveFolderLink);
+      if (folderId) {
+        event.googleDriveFolderId = folderId;
+      }
+    }
+
     Object.assign(event, req.body);
     event.updatedAt = Date.now();
     await event.save();
-    res.json(event);
+    const safe = sanitizeEvent(event, req.user.id);
+    res.json(safe);
   } catch (error) {
     res.status(400).json({ message: error.message });
   }
 });
 
-// Delete event
-router.delete('/:id', async (req, res) => {
+// Delete event (authenticated, organizer only)
+router.delete('/:id', authenticate, requireOrganizer, async (req, res) => {
   try {
-    const event = await Event.findByIdAndDelete(req.params.id);
+    const event = await Event.findById(req.params.id);
     if (!event) return res.status(404).json({ message: 'Event not found' });
+
+    // Only the event creator can delete
+    if (event.createdBy.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'You can only delete your own events.' });
+    }
+
+    await Event.findByIdAndDelete(req.params.id);
     res.json({ message: 'Event deleted' });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// Send email reminders
-router.post('/:id/send-reminders', async (req, res) => {
+// Send email reminders (authenticated, organizer only)
+router.post('/:id/send-reminders', authenticate, requireOrganizer, async (req, res) => {
   try {
     const { reminderType = 'confirmed', customMessage } = req.body;
     const event = await Event.findById(req.params.id).populate('attendees');
     if (!event) return res.status(404).json({ message: 'Event not found' });
+
+    // Only the event creator can send reminders
+    if (event.createdBy.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'You can only send reminders for your own events.' });
+    }
 
     const transporter = nodemailer.createTransport({
       service: 'gmail',
@@ -172,17 +207,26 @@ router.post('/:id/send-reminders', async (req, res) => {
   }
 });
 
-// Get events by organizer
-router.get('/organizer/:organizerId', async (req, res) => {
+// Get events by organizer (authenticated — only returns own events)
+// Use /organizer/me to get the current user's events from the JWT token
+router.get('/organizer/:organizerId', authenticate, async (req, res) => {
   try {
-    const events = await Event.find({ createdBy: req.params.organizerId }).populate('createdBy', 'name email organization');
-    res.json(events);
+    // Resolve the organizerId: "me" means the authenticated user
+    const targetId = req.params.organizerId === 'me' ? req.user.id : req.params.organizerId;
+    
+    // Only allow users to view their own organizer events
+    if (targetId !== req.user.id) {
+      return res.status(403).json({ message: 'You can only view your own events.' });
+    }
+    const events = await Event.find({ createdBy: targetId }).populate('createdBy', 'name email organization');
+    const safe = sanitizeEvents(events, req.user.id);
+    res.json(safe);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// Get event details by passId
+// Get event details by passId (public — only non-sensitive fields)
 router.get('/by-passid/:passId', async (req, res) => {
   try {
     const event = await Event.findOne({ passId: req.params.passId })
@@ -190,8 +234,9 @@ router.get('/by-passid/:passId', async (req, res) => {
     
     if (!event) return res.status(404).json({ message: 'Event not found' });
     
+    const safe = sanitizeEvent(event, null);
     res.json({
-      ...event.toObject(),
+      ...safe,
       organizer: event.createdBy,
       attendeeCount: event.attendees.length,
       confirmedCount: event.attendees.filter(a => a.status === 'confirmed').length
@@ -201,25 +246,37 @@ router.get('/by-passid/:passId', async (req, res) => {
   }
 });
 
-// Get all events a user has joined as attendee
-router.get('/by-user/:userId', async (req, res) => {
+// Get all events a user has joined as attendee (authenticated)
+// Use /by-user/me to get the current user's events from the JWT token
+router.get('/by-user/:userId', authenticate, async (req, res) => {
   try {
-    const events = await Event.find({ 'attendees.userId': req.params.userId })
+    // Resolve the userId: "me" means the authenticated user
+    const targetUserId = req.params.userId === 'me' ? req.user.id : req.params.userId;
+    
+    // Only allow users to view their own joined events
+    if (targetUserId !== req.user.id) {
+      return res.status(403).json({ message: 'You can only view your own events.' });
+    }
+    const events = await Event.find({ 'attendees.userId': targetUserId })
       .populate('createdBy', 'name email organization');
-    res.json(events);
+    const safe = sanitizeEvents(events, null);
+    res.json(safe);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// Join event by passId
-router.post('/join-by-passid', async (req, res) => {
+// Join event by passId (authenticated)
+router.post('/join-by-passid', authenticate, async (req, res) => {
   try {
-    const { passId, userId } = req.body;
+    const { passId } = req.body;
     
-    if (!passId || !userId) {
-      return res.status(400).json({ message: 'passId and userId are required' });
+    if (!passId) {
+      return res.status(400).json({ message: 'passId is required' });
     }
+
+    // Use the authenticated user's ID — never trust client-supplied userId
+    const userId = req.user.id;
 
     const event = await Event.findOne({ passId });
     if (!event) return res.status(404).json({ message: 'Invalid pass ID' });
@@ -238,20 +295,23 @@ router.post('/join-by-passid', async (req, res) => {
     });
 
     await event.save();
-    res.json({ message: 'Successfully joined event', event });
+    res.json({ message: 'Successfully joined event' });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// Leave event (attendee removes themselves)
-router.post('/leave-by-passid', async (req, res) => {
+// Leave event (attendee removes themselves) — authenticated
+router.post('/leave-by-passid', authenticate, async (req, res) => {
   try {
-    const { passId, userId } = req.body;
+    const { passId } = req.body;
     
-    if (!passId || !userId) {
-      return res.status(400).json({ message: 'passId and userId are required' });
+    if (!passId) {
+      return res.status(400).json({ message: 'passId is required' });
     }
+
+    // Use the authenticated user's ID
+    const userId = req.user.id;
 
     const event = await Event.findOne({ passId });
     if (!event) return res.status(404).json({ message: 'Event not found' });
@@ -269,13 +329,18 @@ router.post('/leave-by-passid', async (req, res) => {
   }
 });
 
-// Confirm attendance (organizer accepts)
-router.post('/:eventId/confirm-attendee', async (req, res) => {
+// Confirm attendance (organizer accepts) — authenticated
+router.post('/:eventId/confirm-attendee', authenticate, requireOrganizer, async (req, res) => {
   try {
     const { attendeeId } = req.body;
     const event = await Event.findById(req.params.eventId);
     
     if (!event) return res.status(404).json({ message: 'Event not found' });
+
+    // Only the event creator can confirm attendees
+    if (event.createdBy.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'You can only confirm attendees for your own events.' });
+    }
 
     const attendee = event.attendees.find(a => a.userId.toString() === attendeeId);
     if (!attendee) return res.status(404).json({ message: 'Attendee not found' });
@@ -283,18 +348,23 @@ router.post('/:eventId/confirm-attendee', async (req, res) => {
     attendee.status = 'confirmed';
     await event.save();
     
-    res.json({ message: 'Attendee confirmed', event });
+    res.json({ message: 'Attendee confirmed' });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// Global send reminders endpoint
-router.post('/send-reminders', async (req, res) => {
+// Global send reminders endpoint (authenticated, organizer only)
+router.post('/send-reminders', authenticate, requireOrganizer, async (req, res) => {
   try {
     const { eventId, reminderType = 'confirmed', customMessage } = req.body;
     const event = await Event.findById(eventId).populate('attendees');
     if (!event) return res.status(404).json({ message: 'Event not found' });
+
+    // Only the event creator can send reminders
+    if (event.createdBy.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'You can only send reminders for your own events.' });
+    }
 
     const transporter = nodemailer.createTransport({
       service: 'gmail',

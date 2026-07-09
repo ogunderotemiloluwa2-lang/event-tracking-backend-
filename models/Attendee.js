@@ -56,6 +56,6 @@ const attendeeSchema = new mongoose.Schema({
     type: Date,
     default: Date.now
   }
-}, { collection: 'attendee' });
+}, { collection: 'attendees' });
 
 module.exports = mongoose.model('Attendee', attendeeSchema);

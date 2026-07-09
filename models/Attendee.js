@@ -7,10 +7,12 @@ const attendeeSchema = new mongoose.Schema({
   },
   email: {
     type: String,
-
     required: true  
   },
-  phone: String,
+  phone: {
+    type: String,
+    default: ''
+  },
   event: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Event',
@@ -26,7 +28,10 @@ const attendeeSchema = new mongoose.Schema({
     unique: true,
     sparse: true
   },
-  checkInTime: Date,
+  checkInTime: {
+    type: Date,
+    default: null
+  },
   photos: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Photo'
@@ -35,8 +40,14 @@ const attendeeSchema = new mongoose.Schema({
     type: Number,
     default: 1
   },
-  dietaryRestrictions: String,
-  specialRequests: String,
+  dietaryRestrictions: {
+    type: String,
+    default: ''
+  },
+  specialRequests: {
+    type: String,
+    default: ''
+  },
   createdAt: {
     type: Date,
     default: Date.now
@@ -45,6 +56,6 @@ const attendeeSchema = new mongoose.Schema({
     type: Date,
     default: Date.now
   }
-});
+}, { collection: 'attendee' });
 
 module.exports = mongoose.model('Attendee', attendeeSchema);

@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
 const User = require('../models/User');
 const { getAuthorizationUrl, getAccessTokenFromCode } = require('../utils/googleDrive');
 
@@ -30,18 +29,38 @@ router.post('/register', async (req, res) => {
 
     const normalizedEmail = normalizeEmail(email);
 
-    // Case-insensitive existence check so "John@x.com" and "john@x.com" don't both register
-    const existing = await User.findOne({ email: new RegExp(`^${escapeRegex(normalizedEmail)}$`, 'i') });
-    if (existing) return res.status(400).json({ message: 'Email already registered' });
+    // Case-insensitive existence check across both collections
+    const existingUser = await User.findUserByEmail(normalizedEmail);
+    if (existingUser) return res.status(400).json({ message: 'Email already registered' });
 
     const salt = await bcrypt.genSalt(10);
     const hash = await bcrypt.hash(password, salt);
+    const roleType = role === 'organizer' ? 'organizer' : 'attendee';
 
-    const user = new User({ name, email: normalizedEmail, password: hash, role, phone, organization });
+    let user;
+    if (roleType === 'organizer') {
+      const Organizer = require('../models/Organizer');
+      user = new Organizer({
+        name, email: normalizedEmail, password: hash, role: 'organizer',
+        phone, organization
+      });
+    } else {
+      const AttendeeUser = require('../models/AttendeeUser');
+      user = new AttendeeUser({
+        name, email: normalizedEmail, password: hash, role: 'attendee', phone
+      });
+    }
+
     await user.save();
 
     const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, user: { id: user._id, name: user.name, email: user.email, role: user.role, phone: user.phone, organization: user.organization } });
+    res.json({
+      token,
+      user: {
+        id: user._id, name: user.name, email: user.email,
+        role: user.role, phone: user.phone || null, organization: user.organization || null
+      }
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Server error' });
@@ -54,16 +73,21 @@ router.post('/login', async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ message: 'Missing fields' });
 
-    // Case-insensitive lookup so existing accounts saved with any capitalization still match
     const normalizedEmail = normalizeEmail(email);
-    const user = await User.findOne({ email: new RegExp(`^${escapeRegex(normalizedEmail)}$`, 'i') });
+    const user = await User.findUserByEmail(normalizedEmail);
     if (!user) return res.status(400).json({ message: 'Invalid credentials' });
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(400).json({ message: 'Invalid credentials' });
 
     const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, user: { id: user._id, name: user.name, email: user.email, role: user.role } });
+    res.json({
+      token,
+      user: {
+        id: user._id, name: user.name, email: user.email,
+        role: user.role, phone: user.phone || null, organization: user.organization || null
+      }
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Server error' });
@@ -76,7 +100,7 @@ router.post('/forgot-password', async (req, res) => {
     const { email } = req.body;
     if (!email) return res.status(400).json({ message: 'Email is required' });
 
-    const user = await User.findOne({ email });
+    const user = await User.findUserByEmail(email);
     if (!user) return res.status(400).json({ message: 'If email exists, you will receive a verification code' });
 
     // Generate 6-digit verification code
@@ -88,8 +112,6 @@ router.post('/forgot-password', async (req, res) => {
     user.resetCodeExpiry = resetCodeExpiry;
     await user.save();
 
-    // TODO: Send email with verification code
-    // For now, return success message
     console.log(`📧 Password reset code for ${email}: ${resetCode} (expires in 10 minutes)`);
 
     res.json({ message: 'A 6-digit verification code has been sent to your email. Valid for 10 minutes.' });
@@ -105,7 +127,7 @@ router.post('/verify-code', async (req, res) => {
     const { email, code } = req.body;
     if (!email || !code) return res.status(400).json({ message: 'Email and code are required' });
 
-    const user = await User.findOne({ email });
+    const user = await User.findUserByEmail(email);
     if (!user) return res.status(400).json({ message: 'User not found' });
 
     // Check if code matches and hasn't expired
@@ -136,7 +158,7 @@ router.post('/reset-password', async (req, res) => {
       return res.status(400).json({ message: 'Passwords do not match' });
     }
 
-    const user = await User.findOne({ email });
+    const user = await User.findUserByEmail(email);
     if (!user) return res.status(400).json({ message: 'User not found' });
 
     // Verify code again
@@ -165,38 +187,6 @@ router.post('/reset-password', async (req, res) => {
   }
 });
 
-// Reset Password - Using Reset Token
-router.post('/reset-password/:token', async (req, res) => {
-  try {
-    const { token } = req.params;
-    const { password, confirmPassword } = req.body;
-
-    if (!password || !confirmPassword) return res.status(400).json({ message: 'Missing fields' });
-    if (password !== confirmPassword) return res.status(400).json({ message: 'Passwords do not match' });
-
-    // Hash the token and find user
-    const resetTokenHash = crypto.createHash('sha256').update(token).digest('hex');
-    const user = await User.findOne({ 
-      resetToken: resetTokenHash,
-      resetExpiry: { $gt: new Date() }
-    });
-
-    if (!user) return res.status(400).json({ message: 'Invalid or expired reset token' });
-
-    // Update password
-    const salt = await bcrypt.genSalt(10);
-    user.password = await bcrypt.hash(password, salt);
-    user.resetToken = undefined;
-    user.resetExpiry = undefined;
-    await user.save();
-
-    res.json({ message: 'Password has been reset successfully. Please sign in with your new password.' });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
 // Store Google Drive OAuth credentials
 router.post('/save-google-drive', async (req, res) => {
   try {
@@ -206,7 +196,7 @@ router.post('/save-google-drive', async (req, res) => {
       return res.status(400).json({ message: 'User ID and access token are required' });
     }
 
-    const user = await User.findById(userId);
+    const user = await User.findUserById(userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     // Save Google Drive credentials
@@ -234,7 +224,7 @@ router.post('/save-google-drive', async (req, res) => {
 // Get user Google Drive status
 router.get('/google-drive-status/:userId', async (req, res) => {
   try {
-    const user = await User.findById(req.params.userId);
+    const user = await User.findUserById(req.params.userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     res.json({
@@ -267,7 +257,7 @@ router.get('/google-auth-url', async (req, res) => {
 // Google OAuth Callback Handler
 router.get('/google-callback', async (req, res) => {
   try {
-    const { code, state } = req.query;
+    const { code } = req.query;
 
     if (!code) {
       return res.status(400).send('Authorization code missing');
@@ -287,8 +277,7 @@ router.get('/google-callback', async (req, res) => {
     console.log('✅ Access token obtained');
     const { accessToken, refreshToken } = tokenResult;
 
-    // Return a friendly success page. We deliberately do NOT print the raw
-    // tokens on screen — they're sensitive and only confuse non-technical users.
+    // Return a friendly success page.
     const htmlResponse = `
     <html>
       <head>
@@ -314,7 +303,6 @@ router.get('/google-callback', async (req, res) => {
              back to EventFlow.</p>
         </div>
         <script>
-          // Hand the tokens back to the app, then close. Tokens stay out of view.
           sessionStorage.setItem('googleAccessToken', '${accessToken}');
           sessionStorage.setItem('googleRefreshToken', '${refreshToken || ''}');
 
@@ -348,7 +336,7 @@ router.post('/save-google-token', async (req, res) => {
       return res.status(400).json({ message: 'User ID and access token are required' });
     }
 
-    const user = await User.findById(userId);
+    const user = await User.findUserById(userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     console.log('💾 Saving Google token for user:', user.email);

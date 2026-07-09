@@ -72,14 +72,14 @@ function getAuthenticatedClient({ accessToken, refreshToken, userId }) {
   if (userId && refreshToken) {
     oauth2Client.on('tokens', async (tokens) => {
       try {
-        const User = require('../models/User');
-        const update = {};
-        if (tokens.access_token) update.googleAccessToken = tokens.access_token;
-        // Google only sends a new refresh_token on the very first grant or
-        // when the user re-consents — but if we get one, save it.
-        if (tokens.refresh_token) update.googleRefreshToken = tokens.refresh_token;
-        await User.findByIdAndUpdate(userId, update);
-        console.log('🔄 Google Drive token refreshed and saved for user', userId);
+        const Organizer = require('../models/Organizer');
+        const user = await Organizer.findById(userId);
+        if (user) {
+          if (tokens.access_token) user.googleAccessToken = tokens.access_token;
+          if (tokens.refresh_token) user.googleRefreshToken = tokens.refresh_token;
+          await user.save();
+          console.log('🔄 Google Drive token refreshed and saved for user', userId);
+        }
       } catch (err) {
         console.error('Failed to save refreshed Google token:', err.message);
       }
@@ -103,8 +103,12 @@ async function refreshAndPersistToken(oauth2Client, userId) {
     const { credentials } = await oauth2Client.refreshAccessToken();
     const freshToken = credentials.access_token;
     if (freshToken && userId) {
-      const User = require('../models/User');
-      await User.findByIdAndUpdate(userId, { googleAccessToken: freshToken });
+      const Organizer = require('../models/Organizer');
+      const user = await Organizer.findById(userId);
+      if (user) {
+        user.googleAccessToken = freshToken;
+        await user.save();
+      }
       console.log('🔄 Access token explicitly refreshed and saved for user', userId);
     }
     return freshToken || null;

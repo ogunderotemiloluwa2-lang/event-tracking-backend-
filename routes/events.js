@@ -2,13 +2,12 @@ const express = require('express');
 const router = express.Router();
 const Event = require('../models/Event');
 const Attendee = require('../models/Attendee');
-const User = require('../models/User');
+const Organizer = require('../models/Organizer');
 const QRCode = require('qrcode');
 const nodemailer = require('nodemailer');
 const multer = require('multer');
 const { authenticate, requireOrganizer, sanitizeEvent, sanitizeEvents } = require('../middleware/auth');
 const { uploadPhotoToGoogleDrive, getPhotosFromGoogleDrive, extractFolderId, verifyFolderWriteAccess } = require('../utils/googleDrive');
-
 // Local multer for photo uploads only (not applied globally)
 const photoUpload = multer({
   storage: multer.memoryStorage(),
@@ -74,7 +73,7 @@ router.post('/', authenticate, async (req, res) => {
       console.log('✅ Extracted Google Drive Folder ID:', googleDriveFolderId);
 
       // Validate that the organizer can write to this folder
-      const organizer = await User.findById(organizerId);
+      const organizer = await Organizer.findById(organizerId);
       if (organizer && (organizer.googleRefreshToken || organizer.googleAccessToken)) {
         console.log('🔍 Validating folder write access...');
         const validation = await verifyFolderWriteAccess({
@@ -145,7 +144,7 @@ router.put('/:id', authenticate, requireOrganizer, async (req, res) => {
       const folderId = extractFolderId(req.body.googleDriveFolderLink);
       if (folderId) {
         // Validate the folder is writable by the organizer
-        const organizer = await User.findById(req.user.id);
+        const organizer = await Organizer.findById(req.user.id);
         if (organizer && (organizer.googleRefreshToken || organizer.googleAccessToken)) {
           console.log('🔍 Validating folder write access on update...');
           const validation = await verifyFolderWriteAccess({

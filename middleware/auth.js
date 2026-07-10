@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const User = require('../models/User');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -40,12 +41,13 @@ function requireOrganizer(req, res, next) {
 function sanitizeEvent(event, userId) {
   const obj = event.toObject ? event.toObject() : { ...event };
   
-  // Always strip these from client responses
+  // Strip the full folder link (contains sensitive info), but keep the folder ID
+  // so the frontend can check if Drive is configured and use it for navigation.
   delete obj.googleDriveFolderLink;
-  delete obj.googleDriveFolderId;
   
-  // Strip QR code unless it's the organizer viewing their own event
+  // Only keep googleDriveFolderId if the requester is the event's own organizer
   if (!userId || !event.createdBy || (event.createdBy._id || event.createdBy).toString() !== userId) {
+    delete obj.googleDriveFolderId;
     delete obj.qrCode;
   }
   

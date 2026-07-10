@@ -84,14 +84,13 @@ router.post('/', authenticate, async (req, res) => {
         });
 
         if (!validation.ok) {
-          return res.status(400).json({
-            message: 'Google Drive folder validation failed',
-            details: `The organizer's Google account can't write to this folder. Make sure the folder was created in YOUR OWN Google Drive (not shared by someone else). Then paste its link again.`,
-            error: validation.error,
-            code: validation.code
-          });
+          // Non-blocking: warn but still create the event.
+          // The actual photo upload endpoint validates write access again and
+          // gives a friendly, actionable error if the folder isn't writable.
+          console.warn('⚠️ Google Drive folder write access could not be verified:', validation.error);
+        } else {
+          console.log('✅ Folder write access verified');
         }
-        console.log('✅ Folder write access verified');
       } else {
         console.log('⚠️ Google Drive not connected — skipping folder validation. Photos will fail until Drive is connected.');
       }
@@ -139,8 +138,7 @@ router.put('/:id', authenticate, requireOrganizer, async (req, res) => {
       return res.status(403).json({ message: 'You can only edit your own events.' });
     }
 
-    // If a new Drive folder link is provided, extract and validate
-    if (req.body.googleDriveFolderLink) {
+    // If a new Drive folder link is provided, extract and validate      if (req.body.googleDriveFolderLink) {
       const folderId = extractFolderId(req.body.googleDriveFolderLink);
       if (folderId) {
         // Validate the folder is writable by the organizer
@@ -155,14 +153,11 @@ router.put('/:id', authenticate, requireOrganizer, async (req, res) => {
           });
 
           if (!validation.ok) {
-            return res.status(400).json({
-              message: 'Google Drive folder validation failed',
-              details: `This folder isn't writable by your account. Create a folder in YOUR OWN Google Drive and paste its link here.`,
-              error: validation.error,
-              code: validation.code
-            });
+            // Non-blocking: warn but still save the folder link.
+            console.warn('⚠️ Google Drive folder write access could not be verified on update:', validation.error);
+          } else {
+            console.log('✅ Folder write access verified on update');
           }
-          console.log('✅ Folder write access verified on update');
         }
         event.googleDriveFolderId = folderId;
       }

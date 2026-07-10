@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Event = require('../models/Event');
 const Attendee = require('../models/Attendee');
-const User = require('../models/User');
+const { findUserById } = require('../models/User');
 const QRCode = require('qrcode');
 const nodemailer = require('nodemailer');
 const multer = require('multer');
@@ -74,7 +74,7 @@ router.post('/', authenticate, async (req, res) => {
       console.log('✅ Extracted Google Drive Folder ID:', googleDriveFolderId);
 
       // Validate that the organizer can write to this folder
-      const organizer = await User.findById(organizerId);
+      const organizer = await findUserById(organizerId);
       if (organizer && (organizer.googleRefreshToken || organizer.googleAccessToken)) {
         console.log('🔍 Validating folder write access...');
         const validation = await verifyFolderWriteAccess({
@@ -145,7 +145,7 @@ router.put('/:id', authenticate, requireOrganizer, async (req, res) => {
       const folderId = extractFolderId(req.body.googleDriveFolderLink);
       if (folderId) {
         // Validate the folder is writable by the organizer
-        const organizer = await User.findById(req.user.id);
+        const organizer = await findUserById(req.user.id);
         if (organizer && (organizer.googleRefreshToken || organizer.googleAccessToken)) {
           console.log('🔍 Validating folder write access on update...');
           const validation = await verifyFolderWriteAccess({

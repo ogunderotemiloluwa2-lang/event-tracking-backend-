@@ -138,7 +138,8 @@ router.put('/:id', authenticate, requireOrganizer, async (req, res) => {
       return res.status(403).json({ message: 'You can only edit your own events.' });
     }
 
-    // If a new Drive folder link is provided, extract and validate      if (req.body.googleDriveFolderLink) {
+    // If a new Drive folder link is provided, extract and validate
+    if (req.body.googleDriveFolderLink) {
       const folderId = extractFolderId(req.body.googleDriveFolderLink);
       if (folderId) {
         // Validate the folder is writable by the organizer

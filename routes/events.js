@@ -2,12 +2,13 @@ const express = require('express');
 const router = express.Router();
 const Event = require('../models/Event');
 const Attendee = require('../models/Attendee');
-const Organizer = require('../models/Organizer');
+const User = require('../models/User');
 const QRCode = require('qrcode');
 const nodemailer = require('nodemailer');
 const multer = require('multer');
 const { authenticate, requireOrganizer, sanitizeEvent, sanitizeEvents } = require('../middleware/auth');
-const { uploadPhotoToGoogleDrive, getPhotosFromGoogleDrive, extractFolderId, verifyFolderWriteAccess } = require('../utils/googleDrive');
+const { uploadPhotoToGoogleDrive, getPhotosFromGoogleDrive, extractFolderId, verifyFolderWriteAccess, getAuthenticatedClient, refreshAndPersistToken } = require('../utils/googleDrive');
+
 // Local multer for photo uploads only (not applied globally)
 const photoUpload = multer({
   storage: multer.memoryStorage(),
@@ -73,7 +74,7 @@ router.post('/', authenticate, async (req, res) => {
       console.log('✅ Extracted Google Drive Folder ID:', googleDriveFolderId);
 
       // Validate that the organizer can write to this folder
-      const organizer = await Organizer.findById(organizerId);
+      const organizer = await User.findById(organizerId);
       if (organizer && (organizer.googleRefreshToken || organizer.googleAccessToken)) {
         console.log('🔍 Validating folder write access...');
         const validation = await verifyFolderWriteAccess({
@@ -84,13 +85,14 @@ router.post('/', authenticate, async (req, res) => {
         });
 
         if (!validation.ok) {
-          // Non-blocking: warn but still create the event.
-          // The actual photo upload endpoint validates write access again and
-          // gives a friendly, actionable error if the folder isn't writable.
-          console.warn('⚠️ Google Drive folder write access could not be verified:', validation.error);
-        } else {
-          console.log('✅ Folder write access verified');
+          return res.status(400).json({
+            message: 'Google Drive folder validation failed',
+            details: `The organizer's Google account can't write to this folder. Make sure the folder was created in YOUR OWN Google Drive (not shared by someone else). Then paste its link again.`,
+            error: validation.error,
+            code: validation.code
+          });
         }
+        console.log('✅ Folder write access verified');
       } else {
         console.log('⚠️ Google Drive not connected — skipping folder validation. Photos will fail until Drive is connected.');
       }
@@ -143,7 +145,7 @@ router.put('/:id', authenticate, requireOrganizer, async (req, res) => {
       const folderId = extractFolderId(req.body.googleDriveFolderLink);
       if (folderId) {
         // Validate the folder is writable by the organizer
-        const organizer = await Organizer.findById(req.user.id);
+        const organizer = await User.findById(req.user.id);
         if (organizer && (organizer.googleRefreshToken || organizer.googleAccessToken)) {
           console.log('🔍 Validating folder write access on update...');
           const validation = await verifyFolderWriteAccess({
@@ -154,11 +156,14 @@ router.put('/:id', authenticate, requireOrganizer, async (req, res) => {
           });
 
           if (!validation.ok) {
-            // Non-blocking: warn but still save the folder link.
-            console.warn('⚠️ Google Drive folder write access could not be verified on update:', validation.error);
-          } else {
-            console.log('✅ Folder write access verified on update');
+            return res.status(400).json({
+              message: 'Google Drive folder validation failed',
+              details: `This folder isn't writable by your account. Create a folder in YOUR OWN Google Drive and paste its link here.`,
+              error: validation.error,
+              code: validation.code
+            });
           }
+          console.log('✅ Folder write access verified on update');
         }
         event.googleDriveFolderId = folderId;
       }
@@ -453,7 +458,7 @@ router.post('/send-reminders', authenticate, requireOrganizer, async (req, res) 
 router.post('/:eventId/photos', photoUpload.single('file'), async (req, res) => {
   try {
     const { eventId } = req.params;
-    const { passId, photoCaption } = req.body;
+    const { passId, photoCaption, uploaderName } = req.body;
     const file = req.file;
 
     console.log('\n📸 PHOTO UPLOAD REQUEST RECEIVED');
@@ -506,7 +511,8 @@ router.post('/:eventId/photos', photoUpload.single('file'), async (req, res) => 
       refreshToken: organizer.googleRefreshToken,
       userId: organizer._id,  // pass userId so refreshed tokens get saved
       mimeType: file.mimetype || 'image/jpeg',
-      photoCaption
+      photoCaption,
+      uploaderName: uploaderName || 'Guest'
     });
 
     if (!uploadResult.success) {
@@ -601,6 +607,7 @@ async function listEventPhotos(req, res) {
       photoId: photo.id,
       fileName: photo.name,
       photoCaption: photo.properties?.caption || '',
+      uploaderName: photo.properties?.uploaderName || 'Guest',
       uploadedAt: photo.createdTime,
       downloadUrl: photo.webViewLink,
       thumbnailUrl: photo.thumbnailLink || null,
@@ -622,5 +629,58 @@ async function listEventPhotos(req, res) {
 
 router.get('/:eventId/photos', listEventPhotos);
 router.get('/:eventId/photos-list', listEventPhotos);
+
+// Proxy Google Drive image — serves the image bytes using the organizer's OAuth tokens
+// so the frontend <img> tag doesn't hit Google's auth wall.
+router.get('/:eventId/drive-image/:fileId', async (req, res) => {
+  try {
+    const { eventId, fileId } = req.params;
+
+    const event = await Event.findById(eventId).populate('createdBy');
+    if (!event) return res.status(404).json({ message: 'Event not found' });
+
+    const organizer = event.createdBy;
+    if (!organizer || (!organizer.googleRefreshToken && !organizer.googleAccessToken)) {
+      return res.status(400).json({ message: 'Organizer has not connected Google Drive' });
+    }
+
+    const oauth2Client = getAuthenticatedClient({
+      accessToken: organizer.googleAccessToken,
+      refreshToken: organizer.googleRefreshToken,
+      userId: organizer._id
+    });
+    await refreshAndPersistToken(oauth2Client, organizer._id);
+
+    // Get the fresh access token from credentials
+    const accessToken = oauth2Client.credentials?.access_token;
+    if (!accessToken) return res.status(500).json({ message: 'Failed to get access token' });
+
+    // Fetch the image from Google Drive using the access token
+    const axios = require('axios');
+    const driveResponse = await axios({
+      method: 'GET',
+      url: `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+      responseType: 'stream',
+    });
+
+    // Forward content-type and content-length
+    if (driveResponse.headers['content-type']) {
+      res.setHeader('Content-Type', driveResponse.headers['content-type']);
+    }
+    if (driveResponse.headers['content-length']) {
+      res.setHeader('Content-Length', driveResponse.headers['content-length']);
+    }
+    // Cache for 1 hour so repeated views don't re-fetch
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+
+    driveResponse.data.pipe(res);
+  } catch (error) {
+    console.error('❌ Drive image proxy error:', error.message);
+    res.status(500).json({ message: 'Failed to fetch image from Google Drive' });
+  }
+});
 
 module.exports = router;

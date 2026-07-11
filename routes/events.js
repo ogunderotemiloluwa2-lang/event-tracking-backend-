@@ -601,13 +601,13 @@ async function listEventPhotos(req, res) {
       userId: organizer._id
     });
 
-    // Server-side eventId filtering — include photos tagged for this event OR
-    // legacy photos that don't have an eventId tag yet (uploaded before the fix).
-    // This prevents newly uploaded photos from leaking between events while
-    // keeping all existing photos visible.
+    // STRICT eventId filtering — only show photos explicitly tagged for this
+    // specific event. Legacy photos (uploaded before the eventId tagging fix was
+    // deployed) don't have an eventId property and will no longer appear, but this
+    // guarantees ZERO cross-event photo leakage when multiple events share the
+    // same Google Drive folder.
     const photos = allPhotos.filter(photo => {
-      const photoEventId = photo.properties?.eventId;
-      return !photoEventId || photoEventId === eventId;
+      return photo.properties?.eventId === eventId;
     });
 
     console.log(`✅ Retrieved ${allPhotos.length} raw photos, filtered to ${photos.length} for event ${eventId}`);

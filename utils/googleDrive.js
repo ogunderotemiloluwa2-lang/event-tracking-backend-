@@ -252,7 +252,7 @@ async function getPhotosFromGoogleDrive({ folderId, accessToken, refreshToken, u
       includeItemsFromAllDrives: true
     });
 
-    console.log(`📸 Drive query returned ${response.data.files?.length || 0} photos${eventId ? ' for event ' + eventId : ''}`);
+    console.log(`📸 Drive query returned ${response.data.files?.length || 0} photos`);
     return response.data.files || [];
   } catch (error) {
     const googleErr = error?.response?.data?.error;

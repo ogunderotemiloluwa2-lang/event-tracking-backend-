@@ -232,11 +232,8 @@ async function uploadPhotoToGoogleDrive({
 
 /**
  * List photos from the organizer's Drive folder, authenticated as them.
- * When eventId is provided, only photos tagged with that eventId are returned,
- * preventing photos from other events (that share the same Drive folder) from
- * appearing in the wrong event gallery.
  */
-async function getPhotosFromGoogleDrive({ folderId, accessToken, refreshToken, userId, eventId }) {
+async function getPhotosFromGoogleDrive({ folderId, accessToken, refreshToken, userId }) {
   try {
     const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, userId });
     await refreshAndPersistToken(oauth2Client, userId);

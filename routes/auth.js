@@ -263,6 +263,10 @@ router.get('/google-callback', async (req, res) => {
       return res.status(400).send('Authorization code missing');
     }
 
+    // Set COOP to unsafe-none so the popup can communicate back to the main window
+    // via window.opener.postMessage without being blocked by browser security policies.
+    res.set('Cross-Origin-Opener-Policy', 'unsafe-none');
+
     console.log('🔐 Google OAuth callback received');
     console.log('   Code:', code.substring(0, 20) + '...');
 

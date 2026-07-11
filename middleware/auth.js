@@ -35,8 +35,9 @@ function requireOrganizer(req, res, next) {
 }
 
 /**
- * Strip sensitive Google Drive fields from an event object before sending to client.
- * Drive fields are ONLY kept if the requester is the event's organizer.
+ * Strip sensitive fields from an event object before sending to client.
+ * The googleDriveFolderId is kept for all users (needed so attendees can
+ * upload photos). The full folder link and QR code are organizer-only.
  */
 function sanitizeEvent(event, userId) {
   const obj = event.toObject ? event.toObject() : { ...event };
@@ -45,9 +46,11 @@ function sanitizeEvent(event, userId) {
   // so the frontend can check if Drive is configured and use it for navigation.
   delete obj.googleDriveFolderLink;
   
-  // Only keep googleDriveFolderId if the requester is the event's own organizer
+  // Only expose the QR code to the event's own organizer
+  // Keep googleDriveFolderId for all users — it's needed so attendees can
+  // upload photos directly to the organizer's Google Drive, otherwise the
+  // PhotoUpload page's client-side check (event.googleDriveFolderId) fails.
   if (!userId || !event.createdBy || (event.createdBy._id || event.createdBy).toString() !== userId) {
-    delete obj.googleDriveFolderId;
     delete obj.qrCode;
   }
   

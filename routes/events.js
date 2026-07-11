@@ -512,7 +512,8 @@ router.post('/:eventId/photos', photoUpload.single('file'), async (req, res) => 
       userId: organizer._id,  // pass userId so refreshed tokens get saved
       mimeType: file.mimetype || 'image/jpeg',
       photoCaption,
-      uploaderName: uploaderName || 'Guest'
+      uploaderName: uploaderName || 'Guest',
+      eventId: event._id.toString()  // tag photo with event ID so we can filter by it
     });
 
     if (!uploadResult.success) {
@@ -593,14 +594,23 @@ async function listEventPhotos(req, res) {
 
     // Fetch photos from Google Drive
     console.log('📥 Fetching photos from Google Drive...');
-    const photos = await getPhotosFromGoogleDrive({
+    const allPhotos = await getPhotosFromGoogleDrive({
       folderId: event.googleDriveFolderId,
       accessToken: organizer.googleAccessToken,
       refreshToken: organizer.googleRefreshToken,
       userId: organizer._id
     });
 
-    console.log(`✅ Retrieved ${photos.length} photos from Google Drive`);
+    // Server-side eventId filtering — include photos tagged for this event OR
+    // legacy photos that don't have an eventId tag yet (uploaded before the fix).
+    // This prevents newly uploaded photos from leaking between events while
+    // keeping all existing photos visible.
+    const photos = allPhotos.filter(photo => {
+      const photoEventId = photo.properties?.eventId;
+      return !photoEventId || photoEventId === eventId;
+    });
+
+    console.log(`✅ Retrieved ${allPhotos.length} raw photos, filtered to ${photos.length} for event ${eventId}`);
 
     // Format photos for frontend
     const formattedPhotos = photos.map(photo => ({

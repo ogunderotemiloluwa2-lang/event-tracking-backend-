@@ -149,6 +149,7 @@ async function getAccessTokenFromCode(code) {
  * @param {string} opts.refreshToken  - Organizer's refresh token (preferred)
  * @param {string} [opts.mimeType]    - File mime type (defaults image/jpeg)
  * @param {string} [opts.photoCaption]
+ * @param {string} [opts.eventId]   - MongoDB _id of the event (for cross-event filtering)
  */
 async function uploadPhotoToGoogleDrive({
   folderId,
@@ -159,7 +160,8 @@ async function uploadPhotoToGoogleDrive({
   userId,
   mimeType = 'image/jpeg',
   photoCaption = '',
-  uploaderName = 'Guest'
+  uploaderName = 'Guest',
+  eventId = ''
 }) {
   try {
     console.log('📤 Uploading photo to organizer Google Drive...');
@@ -182,7 +184,8 @@ async function uploadPhotoToGoogleDrive({
       properties: {
         caption: photoCaption || '',
         uploaderName: uploaderName || 'Guest',
-        eventPhoto: 'true'
+        eventPhoto: 'true',
+        eventId: eventId || ''
       }
     };
 
@@ -229,13 +232,19 @@ async function uploadPhotoToGoogleDrive({
 
 /**
  * List photos from the organizer's Drive folder, authenticated as them.
+ * When eventId is provided, only photos tagged with that eventId are returned,
+ * preventing photos from other events (that share the same Drive folder) from
+ * appearing in the wrong event gallery.
  */
-async function getPhotosFromGoogleDrive({ folderId, accessToken, refreshToken, userId }) {
+async function getPhotosFromGoogleDrive({ folderId, accessToken, refreshToken, userId, eventId }) {
   try {
     const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, userId });
     await refreshAndPersistToken(oauth2Client, userId);
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
+    // Fetch ALL event photos from the folder. Server-side filtering by eventId
+    // is done in listEventPhotos (events.js) so that legacy photos uploaded before
+    // the eventId tagging fix are still visible (they don't have the property).
     const response = await drive.files.list({
       q: `'${folderId}' in parents and mimeType contains 'image/' and trashed=false`,
       spaces: 'drive',
@@ -246,6 +255,7 @@ async function getPhotosFromGoogleDrive({ folderId, accessToken, refreshToken, u
       includeItemsFromAllDrives: true
     });
 
+    console.log(`📸 Drive query returned ${response.data.files?.length || 0} photos${eventId ? ' for event ' + eventId : ''}`);
     return response.data.files || [];
   } catch (error) {
     const googleErr = error?.response?.data?.error;

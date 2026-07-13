@@ -167,13 +167,16 @@ async function uploadPhotoToGoogleDrive({
     console.log('📤 Uploading photo to organizer Google Drive...');
     console.log('   Folder ID:', folderId);
     console.log('   File name:', fileName);
+    console.log('   Has accessToken:', !!accessToken);
+    console.log('   Has refreshToken:', !!refreshToken);
 
     const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, userId });
 
     // Explicitly refresh the token before making the API call — the passive
     // 'tokens' event doesn't always fire in time, causing "invalid authentication
     // credentials" errors when the stored access token has expired.
-    await refreshAndPersistToken(oauth2Client, userId);
+    const refreshed = await refreshAndPersistToken(oauth2Client, userId);
+    console.log('   Token after refresh: exists=', !!refreshed);
 
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
@@ -195,8 +198,7 @@ async function uploadPhotoToGoogleDrive({
         mimeType,
         body: Readable.from(fileBuffer)
       },
-      fields: 'id, name, webViewLink, thumbnailLink, mimeType, size, createdTime',
-      supportsAllDrives: true
+      fields: 'id, name, webViewLink, thumbnailLink, mimeType, size, createdTime'
     });
 
     console.log('✅ Photo uploaded to Google Drive successfully!');
@@ -247,9 +249,7 @@ async function getPhotosFromGoogleDrive({ folderId, accessToken, refreshToken, u
       spaces: 'drive',
       fields: 'files(id, name, webViewLink, thumbnailLink, createdTime, size, properties)',
       pageSize: 100,
-      orderBy: 'createdTime desc',
-      supportsAllDrives: true,
-      includeItemsFromAllDrives: true
+      orderBy: 'createdTime desc'
     });
 
     console.log(`📸 Drive query returned ${response.data.files?.length || 0} photos`);
@@ -292,13 +292,12 @@ async function verifyFolderWriteAccess({ folderId, accessToken, refreshToken, us
         mimeType: 'text/plain',
         body: Readable.from(Buffer.from('probe')),
       },
-      fields: 'id',
-      supportsAllDrives: true,
+      fields: 'id'
     });
 
     // Immediately delete the probe file so the folder stays clean.
     try {
-      await drive.files.delete({ fileId: probe.data.id, supportsAllDrives: true });
+      await drive.files.delete({ fileId: probe.data.id });
     } catch (cleanupErr) {
       console.warn('⚠️ Failed to clean up probe file:', cleanupErr.message);
     }

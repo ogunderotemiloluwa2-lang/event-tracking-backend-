@@ -40,7 +40,6 @@ function getOAuth2Client() {
 
 /**
  * Get authorization URL for user to log in.
- * Builds its own OAuth2 client so callers don't have to.
  */
 function getAuthorizationUrl() {
   const oauth2Client = getOAuth2Client();
@@ -55,18 +54,28 @@ function getAuthorizationUrl() {
 
 /**
  * Build an OAuth2 client authenticated as the organizer.
- * Uses the stored refresh token so a fresh access token is minted
- * automatically (access tokens expire after ~1 hour).
  *
- * When googleapis refreshes the token internally, the 'tokens' event
- * fires so we can persist the new access token back to the database.
+ * CRITICAL FIX: We now also set `expiry_date` in the credentials so that
+ * googleapis knows when the access token expires. Without this, the library
+ * cannot determine if a token needs refreshing, and our own
+ * `refreshAndPersistToken` would always try to refresh (causing redundant
+ * API calls that break subsequent uploads).
+ *
+ * When googleapis refreshes the token internally, the 'tokens' event fires
+ * so we can persist the new access token + expiry back to the database.
  */
-function getAuthenticatedClient({ accessToken, refreshToken, userId }) {
+function getAuthenticatedClient({ accessToken, refreshToken, expiryDate, userId }) {
   const oauth2Client = getOAuth2Client();
-  oauth2Client.setCredentials({
+  const credentials = {
     access_token: accessToken || undefined,
     refresh_token: refreshToken || undefined
-  });
+  };
+  // If we have a saved expiry timestamp, set it so googleapis can
+  // determine when to auto-refresh without an explicit call.
+  if (expiryDate) {
+    credentials.expiry_date = expiryDate;
+  }
+  oauth2Client.setCredentials(credentials);
 
   // Persist refreshed tokens so uploads keep working after the 1-hour expiry
   if (userId && refreshToken) {
@@ -75,9 +84,13 @@ function getAuthenticatedClient({ accessToken, refreshToken, userId }) {
         const Organizer = require('../models/Organizer');
         const update = {};
         if (tokens.access_token) update.googleAccessToken = tokens.access_token;
-        // Google only sends a new refresh_token on the very first grant or
-        // when the user re-consents — but if we get one, save it.
         if (tokens.refresh_token) update.googleRefreshToken = tokens.refresh_token;
+        // Also persist the expiry_date so subsequent requests know when to refresh
+        if (tokens.expiry_date) {
+          update.googleTokenExpiry = tokens.expiry_date;
+        } else if (tokens.expires_in) {
+          update.googleTokenExpiry = Date.now() + tokens.expires_in * 1000;
+        }
         await Organizer.findByIdAndUpdate(userId, update);
         console.log('🔄 Google Drive token refreshed and saved for user', userId);
       } catch (err) {
@@ -90,67 +103,88 @@ function getAuthenticatedClient({ accessToken, refreshToken, userId }) {
 }
 
 /**
- * Safely refresh the access token ONLY if it's expired or about to expire.
+ * Refresh the access token ONLY if it's expired (or close to expiring).
  *
- * PROBLEM THIS FIXES:
- * Previously this was called BEFORE every Drive API call, even when the
- * current access token was still valid. On the SECOND consecutive upload,
- * the redundant refresh would trigger a race condition:
- *   1. First upload: refreshAndPersistToken + tokens event both save to DB
- *   2. Second upload: another refresh is triggered, but the refresh token
- *      may have been consumed/invalidated by the first cycle, or the DB
- *      token state is in an inconsistent mid-save state
- *   3. The second refresh corrupts the oauth2client credentials, causing
- *      Google Drive to reject with "Insufficient permissions" (403)
+ * ROOT CAUSE OF THE BUG:
+ *  1. googleapis' `refreshAccessToken()` replaces `this.credentials` with
+ *     Google's response, which is `{ access_token, expires_in, scope }` —
+ *     it NEVER includes `refresh_token`. So after a refresh, the oauth2client
+ *     LOSES its refresh_token and can no longer auto-refresh.
+ *  2. The `expiry_date` was NEVER saved to the database. On every upload, a
+ *     new oauth2client was created WITHOUT `expiry_date`, so googleapis
+ *     didn't know when the token expires, and we always called refresh.
+ *  3. The redundant second refresh (immediately after the first upload) would
+ *     hit Google's token endpoint again, sometimes returning tokens with
+ *     different scopes or throttling, causing the 403 "Insufficient permissions".
  *
- * SOLUTION: Check the token's expiry_date before refreshing. If it's still
- * valid (within its ~1-hour window), skip the refresh entirely. This
- * eliminates the redundant refresh on consecutive uploads while still
- * ensuring expired tokens get refreshed on time.
+ * WHAT WE DO NOW:
+ *  - Before refreshing, check `expiry_date` and skip if still valid.
+ *  - Before calling `refreshAccessToken()`, save the `refresh_token` so we
+ *    can RESTORE it afterward (since the API response doesn't include it).
+ *  - After refresh, save `expiry_date` to DB alongside the new access token.
+ *  - On failure, return the existing access token (not null) so the
+ *    upload can still attempt the API call — it might still work.
  *
- * Returns the (possibly refreshed) access token string, or null if refresh
- * failed AND the existing token is expired.
+ * Returns the (possibly refreshed) access token string, never null.
  */
 async function refreshAndPersistToken(oauth2Client, userId) {
-  if (!oauth2Client.credentials?.refresh_token) {
+  const creds = oauth2Client.credentials || {};
+
+  if (!creds.refresh_token) {
     console.warn('⚠️ No refresh token available — cannot refresh access token');
-    // Return the existing token so the caller can still try — it might work
-    // if the token hasn't expired yet.
-    return oauth2Client.credentials?.access_token || null;
+    return creds.access_token || '';
   }
 
   // Check if the stored access token is still valid.
   // Google access tokens expire after 3600 seconds (1 hour).
-  // We use a 5-minute buffer to avoid edge cases with clock drift.
-  const expiryDate = oauth2Client.credentials.expiry_date;
-  if (expiryDate && Date.now() < expiryDate - 5 * 60 * 1000) {
+  // Use a 5-minute buffer to avoid edge cases with clock drift.
+  if (creds.expiry_date && Date.now() < creds.expiry_date - 5 * 60 * 1000) {
     console.log('✅ Access token still valid (expires in >5 min) — skipping refresh');
-    return oauth2Client.credentials.access_token || null;
+    return creds.access_token || '';
   }
 
   try {
+    // CRITICAL: Save the refresh_token BEFORE calling refreshAccessToken(),
+    // because googleapis' refreshAccessToken() replaces this.credentials
+    // with Google's response, which DOES NOT include refresh_token.
+    const originalRefreshToken = creds.refresh_token;
+
     const { credentials } = await oauth2Client.refreshAccessToken();
     const freshToken = credentials.access_token;
 
+    // CRITICAL: Restore the refresh_token to the oauth2client's credentials
+    // because the refresh response never includes it. Without this, the
+    // oauth2client loses the ability to auto-refresh for subsequent API
+    // calls (e.g., drive.files.create after a refresh).
+    if (!credentials.refresh_token && originalRefreshToken) {
+      oauth2Client.setCredentials({
+        ...credentials,
+        refresh_token: originalRefreshToken
+      });
+    }
+
+    // Persist the new tokens to the database, INCLUDING expiry_date.
     if (freshToken && userId) {
       const Organizer = require('../models/Organizer');
-      // Save BOTH the new access token AND the refresh token (if Google
-      // issued a new one during refresh — this happens occasionally and
-      // the old refresh token is invalidated, so we MUST save the new one).
       const update = { googleAccessToken: freshToken };
+      if (credentials.expiry_date) {
+        update.googleTokenExpiry = credentials.expiry_date;
+      } else if (credentials.expires_in) {
+        update.googleTokenExpiry = Date.now() + credentials.expires_in * 1000;
+      }
       if (credentials.refresh_token) {
         update.googleRefreshToken = credentials.refresh_token;
       }
       await Organizer.findByIdAndUpdate(userId, update);
-      console.log('🔄 Access token explicitly refreshed and saved for user', userId);
+      console.log('🔄 Access token refreshed and saved (with expiry) for user', userId);
     }
-    return freshToken || null;
+    return freshToken || '';
   } catch (err) {
     console.error('❌ Failed to refresh access token:', err.message);
-    // Return the existing token — it might still be valid for a few more minutes
-    // even if we couldn't refresh. The Drive API call will fail with a clear
-    // 401 if the token is truly expired, and the user will see the correct error.
-    return oauth2Client.credentials?.access_token || null;
+    // Return the EXISTING token — it might still be valid for a few more
+    // minutes. The Drive API call will fail with a clear 401 if the token
+    // is truly expired, and the user will see the correct error.
+    return oauth2Client.credentials?.access_token || '';
   }
 }
 
@@ -177,19 +211,10 @@ async function getAccessTokenFromCode(code) {
 
 /**
  * Upload a photo to the organizer's Google Drive folder.
- * Authenticates AS THE ORGANIZER using their stored tokens. The refresh
- * token (when present) lets googleapis transparently mint a fresh access
- * token, so uploads keep working after the 1-hour access-token expiry.
  *
- * @param {Object} opts
- * @param {string} opts.folderId      - Destination Drive folder ID
- * @param {Buffer} opts.fileBuffer    - Image bytes
- * @param {string} opts.fileName      - File name
- * @param {string} opts.accessToken   - Organizer's access token (may be stale)
- * @param {string} opts.refreshToken  - Organizer's refresh token (preferred)
- * @param {string} [opts.mimeType]    - File mime type (defaults image/jpeg)
- * @param {string} [opts.photoCaption]
- * @param {string} [opts.eventId]   - MongoDB _id of the event (for cross-event filtering)
+ * Now also accepts `expiryDate` so we can set it on the oauth2client,
+ * letting googleapis know when the token expires and avoiding redundant
+ * refresh calls.
  */
 async function uploadPhotoToGoogleDrive({
   folderId,
@@ -198,6 +223,7 @@ async function uploadPhotoToGoogleDrive({
   accessToken,
   refreshToken,
   userId,
+  expiryDate,
   mimeType = 'image/jpeg',
   photoCaption = '',
   uploaderName = 'Guest',
@@ -209,12 +235,12 @@ async function uploadPhotoToGoogleDrive({
     console.log('   File name:', fileName);
     console.log('   Has accessToken:', !!accessToken);
     console.log('   Has refreshToken:', !!refreshToken);
+    console.log('   Has expiryDate:', !!expiryDate);
 
-    const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, userId });
+    const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, expiryDate, userId });
 
-    // Safely refresh the token ONLY if it's expired. The refresh also
-    // persists the fresh token to the DB. If the token is still valid,
-    // the refresh is skipped entirely (no redundant API calls).
+    // Refresh ONLY if the token is expired (checks expiry_date internally).
+    // This prevents the redundant second refresh that caused the 403 bug.
     const refreshed = await refreshAndPersistToken(oauth2Client, userId);
     console.log('   Token after refresh check: exists=', !!refreshed);
 
@@ -256,8 +282,6 @@ async function uploadPhotoToGoogleDrive({
     };
 
   } catch (error) {
-    // Google returns the useful detail nested under response.data.error — surface
-    // it so the caller (and ultimately the guest) sees the real reason.
     const googleErr = error?.response?.data?.error;
     const detail = (googleErr && (googleErr.message || googleErr)) ||
       (Array.isArray(error?.errors) && error.errors[0]?.message) ||
@@ -275,15 +299,12 @@ async function uploadPhotoToGoogleDrive({
 /**
  * List photos from the organizer's Drive folder, authenticated as them.
  */
-async function getPhotosFromGoogleDrive({ folderId, accessToken, refreshToken, userId }) {
+async function getPhotosFromGoogleDrive({ folderId, accessToken, refreshToken, userId, expiryDate }) {
   try {
-    const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, userId });
+    const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, expiryDate, userId });
     await refreshAndPersistToken(oauth2Client, userId);
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
-    // Fetch ALL event photos from the folder. Server-side filtering by eventId
-    // is done in listEventPhotos (events.js) so that legacy photos uploaded before
-    // the eventId tagging fix are still visible (they don't have the property).
     const response = await drive.files.list({
       q: `'${folderId}' in parents and mimeType contains 'image/' and trashed=false`,
       spaces: 'drive',
@@ -305,23 +326,13 @@ async function getPhotosFromGoogleDrive({ folderId, accessToken, refreshToken, u
 
 /**
  * Verify that the organizer can write to the specified Drive folder.
- * Uploads a tiny, self-deleting probe file. If that works, the folder is
- * writable. Returns { ok: true } or { ok: false, error: '...' }.
- *
- * @param {Object} opts
- * @param {string} opts.folderId      - Destination Drive folder ID
- * @param {string} opts.accessToken   - Organizer's access token (may be stale)
- * @param {string} opts.refreshToken  - Organizer's refresh token
- * @param {string} opts.userId        - Organizer's MongoDB _id (for token persistence)
  */
-async function verifyFolderWriteAccess({ folderId, accessToken, refreshToken, userId }) {
+async function verifyFolderWriteAccess({ folderId, accessToken, refreshToken, userId, expiryDate }) {
   try {
-    const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, userId });
+    const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, expiryDate, userId });
     await refreshAndPersistToken(oauth2Client, userId);
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
-    // Create a tiny probe file so we can test write permissions without
-    // relying solely on a metadata read (which doesn't prove write access).
     const probe = await drive.files.create({
       requestBody: {
         name: '__eventflow_probe__',
@@ -335,7 +346,6 @@ async function verifyFolderWriteAccess({ folderId, accessToken, refreshToken, us
       fields: 'id'
     });
 
-    // Immediately delete the probe file so the folder stays clean.
     try {
       await drive.files.delete({ fileId: probe.data.id });
     } catch (cleanupErr) {

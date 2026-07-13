@@ -11,6 +11,7 @@ const organizerSchema = new mongoose.Schema({
   resetCodeExpiry: { type: Date, default: null },
   googleAccessToken: { type: String, default: null },
   googleRefreshToken: { type: String, default: null },
+  googleTokenExpiry: { type: Number, default: null },
   googleDriveFolderId: { type: String, default: null },
   createdAt: { type: Date, default: Date.now }
 }, { collection: 'organizers' });

@@ -81,6 +81,7 @@ router.post('/', authenticate, async (req, res) => {
           folderId: googleDriveFolderId,
           accessToken: organizer.googleAccessToken,
           refreshToken: organizer.googleRefreshToken,
+          expiryDate: organizer.googleTokenExpiry,
           userId: organizerId
         });
 
@@ -152,6 +153,7 @@ router.put('/:id', authenticate, requireOrganizer, async (req, res) => {
             folderId,
             accessToken: organizer.googleAccessToken,
             refreshToken: organizer.googleRefreshToken,
+            expiryDate: organizer.googleTokenExpiry,
             userId: req.user.id
           });
 
@@ -509,6 +511,7 @@ router.post('/:eventId/photos', photoUpload.single('file'), async (req, res) => 
       fileName: file.originalname,
       accessToken: organizer.googleAccessToken,
       refreshToken: organizer.googleRefreshToken,
+      expiryDate: organizer.googleTokenExpiry,
       userId: organizer._id,  // pass userId so refreshed tokens get saved
       mimeType: file.mimetype || 'image/jpeg',
       photoCaption,
@@ -598,6 +601,7 @@ async function listEventPhotos(req, res) {
       folderId: event.googleDriveFolderId,
       accessToken: organizer.googleAccessToken,
       refreshToken: organizer.googleRefreshToken,
+      expiryDate: organizer.googleTokenExpiry,
       userId: organizer._id
     });
 
@@ -657,6 +661,7 @@ router.get('/:eventId/drive-image/:fileId', async (req, res) => {
     const oauth2Client = getAuthenticatedClient({
       accessToken: organizer.googleAccessToken,
       refreshToken: organizer.googleRefreshToken,
+      expiryDate: organizer.googleTokenExpiry,
       userId: organizer._id
     });
     await refreshAndPersistToken(oauth2Client, organizer._id);

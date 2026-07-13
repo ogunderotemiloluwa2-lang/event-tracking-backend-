@@ -90,27 +90,67 @@ function getAuthenticatedClient({ accessToken, refreshToken, userId }) {
 }
 
 /**
- * Explicitly refresh the access token and persist it.
- * Call this BEFORE every Drive API call to ensure the token is fresh.
- * Returns the fresh access token string, or null if refresh failed.
+ * Safely refresh the access token ONLY if it's expired or about to expire.
+ *
+ * PROBLEM THIS FIXES:
+ * Previously this was called BEFORE every Drive API call, even when the
+ * current access token was still valid. On the SECOND consecutive upload,
+ * the redundant refresh would trigger a race condition:
+ *   1. First upload: refreshAndPersistToken + tokens event both save to DB
+ *   2. Second upload: another refresh is triggered, but the refresh token
+ *      may have been consumed/invalidated by the first cycle, or the DB
+ *      token state is in an inconsistent mid-save state
+ *   3. The second refresh corrupts the oauth2client credentials, causing
+ *      Google Drive to reject with "Insufficient permissions" (403)
+ *
+ * SOLUTION: Check the token's expiry_date before refreshing. If it's still
+ * valid (within its ~1-hour window), skip the refresh entirely. This
+ * eliminates the redundant refresh on consecutive uploads while still
+ * ensuring expired tokens get refreshed on time.
+ *
+ * Returns the (possibly refreshed) access token string, or null if refresh
+ * failed AND the existing token is expired.
  */
 async function refreshAndPersistToken(oauth2Client, userId) {
   if (!oauth2Client.credentials?.refresh_token) {
     console.warn('⚠️ No refresh token available — cannot refresh access token');
-    return null;
+    // Return the existing token so the caller can still try — it might work
+    // if the token hasn't expired yet.
+    return oauth2Client.credentials?.access_token || null;
   }
+
+  // Check if the stored access token is still valid.
+  // Google access tokens expire after 3600 seconds (1 hour).
+  // We use a 5-minute buffer to avoid edge cases with clock drift.
+  const expiryDate = oauth2Client.credentials.expiry_date;
+  if (expiryDate && Date.now() < expiryDate - 5 * 60 * 1000) {
+    console.log('✅ Access token still valid (expires in >5 min) — skipping refresh');
+    return oauth2Client.credentials.access_token || null;
+  }
+
   try {
     const { credentials } = await oauth2Client.refreshAccessToken();
     const freshToken = credentials.access_token;
+
     if (freshToken && userId) {
       const Organizer = require('../models/Organizer');
-      await Organizer.findByIdAndUpdate(userId, { googleAccessToken: freshToken });
+      // Save BOTH the new access token AND the refresh token (if Google
+      // issued a new one during refresh — this happens occasionally and
+      // the old refresh token is invalidated, so we MUST save the new one).
+      const update = { googleAccessToken: freshToken };
+      if (credentials.refresh_token) {
+        update.googleRefreshToken = credentials.refresh_token;
+      }
+      await Organizer.findByIdAndUpdate(userId, update);
       console.log('🔄 Access token explicitly refreshed and saved for user', userId);
     }
     return freshToken || null;
   } catch (err) {
     console.error('❌ Failed to refresh access token:', err.message);
-    return null;
+    // Return the existing token — it might still be valid for a few more minutes
+    // even if we couldn't refresh. The Drive API call will fail with a clear
+    // 401 if the token is truly expired, and the user will see the correct error.
+    return oauth2Client.credentials?.access_token || null;
   }
 }
 
@@ -172,11 +212,11 @@ async function uploadPhotoToGoogleDrive({
 
     const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, userId });
 
-    // Explicitly refresh the token before making the API call — the passive
-    // 'tokens' event doesn't always fire in time, causing "invalid authentication
-    // credentials" errors when the stored access token has expired.
+    // Safely refresh the token ONLY if it's expired. The refresh also
+    // persists the fresh token to the DB. If the token is still valid,
+    // the refresh is skipped entirely (no redundant API calls).
     const refreshed = await refreshAndPersistToken(oauth2Client, userId);
-    console.log('   Token after refresh: exists=', !!refreshed);
+    console.log('   Token after refresh check: exists=', !!refreshed);
 
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
 

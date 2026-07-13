@@ -152,26 +152,36 @@ async function refreshAndPersistToken(oauth2Client, userId) {
     const { credentials } = await oauth2Client.refreshAccessToken();
     const freshToken = credentials.access_token;
 
-    // CRITICAL: Restore the refresh_token to the oauth2client's credentials
-    // because the refresh response never includes it. Without this, the
-    // oauth2client loses the ability to auto-refresh for subsequent API
-    // calls (e.g., drive.files.create after a refresh).
+    // CRITICAL: Google's refresh response includes `expires_in` (seconds)
+    // but NOT `expiry_date` (absolute timestamp). We MUST calculate it
+    // ourselves so the oauth2client knows when to auto-refresh later.
+    // Without this, every upload triggers a redundant refresh call, and
+    // the second one often fails with a 403 "Insufficient permissions".
+    const calculatedExpiry = credentials.expiry_date ||
+      (credentials.expires_in ? Date.now() + credentials.expires_in * 1000 : undefined);
+
+    // CRITICAL: Restore the refresh_token AND set expiry_date on the
+    // oauth2client's credentials. The refresh response never includes
+    // refresh_token, and without expiry_date the library can't determine
+    // when to auto-refresh — causing redundant refreshes that break
+    // subsequent uploads.
     if (!credentials.refresh_token && originalRefreshToken) {
       oauth2Client.setCredentials({
-        ...credentials,
-        refresh_token: originalRefreshToken
+        access_token: freshToken,
+        refresh_token: originalRefreshToken,
+        expiry_date: calculatedExpiry,
+        token_type: credentials.token_type || 'Bearer',
+        scope: credentials.scope
       });
     }
 
     // Persist the new tokens to the database, INCLUDING expiry_date.
     if (freshToken && userId) {
       const Organizer = require('../models/Organizer');
-      const update = { googleAccessToken: freshToken };
-      if (credentials.expiry_date) {
-        update.googleTokenExpiry = credentials.expiry_date;
-      } else if (credentials.expires_in) {
-        update.googleTokenExpiry = Date.now() + credentials.expires_in * 1000;
-      }
+      const update = {
+        googleAccessToken: freshToken,
+        googleTokenExpiry: calculatedExpiry
+      };
       if (credentials.refresh_token) {
         update.googleRefreshToken = credentials.refresh_token;
       }

@@ -279,7 +279,7 @@ router.get('/google-callback', async (req, res) => {
     }
 
     console.log('✅ Access token obtained');
-    const { accessToken, refreshToken } = tokenResult;
+    const { accessToken, refreshToken, expiryDate } = tokenResult;
 
     // Return a friendly success page.
     const htmlResponse = `
@@ -309,12 +309,14 @@ router.get('/google-callback', async (req, res) => {
         <script>
           sessionStorage.setItem('googleAccessToken', '${accessToken}');
           sessionStorage.setItem('googleRefreshToken', '${refreshToken || ''}');
+          sessionStorage.setItem('googleExpiryDate', '${expiryDate || ''}');
 
           if (window.opener) {
             window.opener.postMessage({
               type: 'google-auth-success',
               accessToken: '${accessToken}',
-              refreshToken: '${refreshToken || ''}'
+              refreshToken: '${refreshToken || ''}',
+              expiryDate: ${expiryDate || 'null'}
             }, '*');
             setTimeout(function () { window.close(); }, 1500);
           }
@@ -334,7 +336,7 @@ router.get('/google-callback', async (req, res) => {
 // Save Google Drive Token (called from frontend after OAuth)
 router.post('/save-google-token', async (req, res) => {
   try {
-    const { userId, accessToken, refreshToken } = req.body;
+    const { userId, accessToken, refreshToken, expiryDate } = req.body;
 
     if (!userId || !accessToken) {
       return res.status(400).json({ message: 'User ID and access token are required' });
@@ -349,6 +351,9 @@ router.post('/save-google-token', async (req, res) => {
     user.googleAccessToken = accessToken;
     if (refreshToken) {
       user.googleRefreshToken = refreshToken;
+    }
+    if (expiryDate) {
+      user.googleTokenExpiry = expiryDate;
     }
     await user.save();
 

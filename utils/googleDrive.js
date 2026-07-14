@@ -77,27 +77,15 @@ function getAuthenticatedClient({ accessToken, refreshToken, expiryDate, userId 
   }
   oauth2Client.setCredentials(credentials);
 
-  // Persist refreshed tokens so uploads keep working after the 1-hour expiry
-  if (userId && refreshToken) {
-    oauth2Client.on('tokens', async (tokens) => {
-      try {
-        const Organizer = require('../models/Organizer');
-        const update = {};
-        if (tokens.access_token) update.googleAccessToken = tokens.access_token;
-        if (tokens.refresh_token) update.googleRefreshToken = tokens.refresh_token;
-        // Also persist the expiry_date so subsequent requests know when to refresh
-        if (tokens.expiry_date) {
-          update.googleTokenExpiry = tokens.expiry_date;
-        } else if (tokens.expires_in) {
-          update.googleTokenExpiry = Date.now() + tokens.expires_in * 1000;
-        }
-        await Organizer.findByIdAndUpdate(userId, update);
-        console.log('🔄 Google Drive token refreshed and saved for user', userId);
-      } catch (err) {
-        console.error('Failed to save refreshed Google token:', err.message);
-      }
-    });
-  }
+  // NOTE: We intentionally do NOT register a `tokens` event listener here.
+  // `refreshAndPersistToken()` is called explicitly before every Drive API
+  // call and handles saving refreshed tokens to the database. A `tokens`
+  // listener would create a race condition — both the listener and
+  // `refreshAndPersistToken` write to the DB concurrently, and the listener
+  // fires multiple times during a single refresh cycle (once from
+  // `refreshAccessToken()` internally, once from our `setCredentials()` call
+  // that restores the refresh_token). Removing the listener eliminates this
+  // entire class of bugs.
 
   return oauth2Client;
 }
@@ -205,10 +193,14 @@ async function getAccessTokenFromCode(code) {
   try {
     const oauth2Client = getOAuth2Client();
     const { tokens } = await oauth2Client.getToken(code);
+    // Calculate expiry_date from expires_in (seconds) if not provided
+    const expiryDate = tokens.expiry_date ||
+      (tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : null);
     return {
       success: true,
       accessToken: tokens.access_token,
-      refreshToken: tokens.refresh_token
+      refreshToken: tokens.refresh_token,
+      expiryDate
     };
   } catch (error) {
     console.error('Error getting access token:', error.message);

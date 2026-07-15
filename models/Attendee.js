@@ -18,15 +18,24 @@ const attendeeSchema = new mongoose.Schema({
     ref: 'Event',
     required: true
   },
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'AttendeeUser',
+    default: null
+  },
   status: {
     type: String,
-    enum: ['pending', 'yes', 'no', 'maybe'],
+    enum: ['pending', 'yes', 'no', 'maybe', 'confirmed', 'checked-in'],
     default: 'pending'
   },
   passId: {
     type: String,
     unique: true,
     sparse: true
+  },
+  qrCode: {
+    type: String,
+    default: ''
   },
   checkInTime: {
     type: Date,

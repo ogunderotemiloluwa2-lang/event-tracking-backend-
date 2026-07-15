@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const Event = require('../models/Event');
 const Attendee = require('../models/Attendee');
 const { findUserById } = require('../models/User');
@@ -230,7 +231,21 @@ router.post('/:id/send-reminders', authenticate, requireOrganizer, async (req, r
       recipients = event.attendees.filter(a => a.status === 'pending');
     }
 
+    // Resolve real email addresses from Attendee records or identity models
+    let sentCount = 0;
     for (const attendee of recipients) {
+      let email = attendee.email;
+      if (!email && attendee.userId) {
+        const attRecord = await Attendee.findOne({ event: event._id, userId: attendee.userId });
+        if (attRecord && attRecord.email) {
+          email = attRecord.email;
+        } else {
+          const userRecord = await findUserById(attendee.userId);
+          if (userRecord) email = userRecord.email;
+        }
+      }
+      if (!email) continue;
+
       const emailHtml = `
         <h2>Event Reminder: ${event.title}</h2>
         <p><strong>Date:</strong> ${new Date(event.date).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
@@ -242,13 +257,14 @@ router.post('/:id/send-reminders', authenticate, requireOrganizer, async (req, r
       
       await transporter.sendMail({
         from: process.env.EMAIL_USER,
-        to: attendee.email,
+        to: email,
         subject: `Reminder: ${event.title} Event`,
         html: emailHtml
       });
+      sentCount++;
     }
 
-    res.json({ message: `Reminders sent to ${recipients.length} attendees` });
+    res.json({ message: `Reminders sent to ${sentCount} attendees` });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -282,12 +298,34 @@ router.get('/by-passid/:passId', async (req, res) => {
     if (!event) return res.status(404).json({ message: 'Event not found' });
     
     const safe = sanitizeEvent(event, null);
-    res.json({
+    const response = {
       ...safe,
       organizer: event.createdBy,
       attendeeCount: event.attendees.length,
       confirmedCount: event.attendees.filter(a => a.status === 'confirmed').length
-    });
+    };
+
+    // If caller provided a valid token, include their unique attendee pass info
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      try {
+        const jwt = require('jsonwebtoken');
+        const token = authHeader.split(' ')[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const isInEvent = event.attendees.some(a => a.userId.toString() === decoded.id);
+        if (isInEvent) {
+          const attendeeRecord = await Attendee.findOne({ event: event._id, userId: decoded.id });
+          if (attendeeRecord && attendeeRecord.passId) {
+            response.attendeePassId = attendeeRecord.passId;
+            response.attendeeQrCode = attendeeRecord.qrCode;
+          }
+        }
+      } catch (e) {
+        // Token invalid — just return public data
+      }
+    }
+
+    res.json(response);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -342,6 +380,30 @@ router.post('/join-by-passid', authenticate, async (req, res) => {
     });
 
     await event.save();
+
+    // Also create an Attendee record so the attendee appears in management/check-in
+    try {
+      const userRecord = await findUserById(userId);
+      if (userRecord) {
+        const existingAttendee = await Attendee.findOne({ event: event._id, userId });
+        if (!existingAttendee) {
+          const attendeePassId = crypto.randomBytes(16).toString('hex');
+          const attendee = new Attendee({
+            name: userRecord.name || 'Attendee',
+            email: userRecord.email || '',
+            event: event._id,
+            userId,
+            passId: attendeePassId,
+            status: 'pending'
+          });
+          await attendee.save();
+        }
+      }
+    } catch (bridgeErr) {
+      // Non-critical: the join succeeded in Event.attendees[]
+      console.error('Failed to create Attendee bridge record:', bridgeErr.message);
+    }
+
     res.json({ message: 'Successfully joined event' });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -370,6 +432,14 @@ router.post('/leave-by-passid', authenticate, async (req, res) => {
 
     event.attendees.splice(attendeeIndex, 1);
     await event.save();
+
+    // Also remove the linked Attendee record
+    try {
+      await Attendee.findOneAndDelete({ event: event._id, userId });
+    } catch (bridgeErr) {
+      console.error('Failed to remove Attendee bridge record:', bridgeErr.message);
+    }
+
     res.json({ message: 'Successfully left event' });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -394,6 +464,35 @@ router.post('/:eventId/confirm-attendee', authenticate, requireOrganizer, async 
 
     attendee.status = 'confirmed';
     await event.save();
+
+    // Generate a unique passId + QR for this attendee's personal pass
+    try {
+      let attendeeRecord = await Attendee.findOne({ event: event._id, userId: attendeeId });
+      if (!attendeeRecord) {
+        // Create one for legacy attendees who joined before the bridge was added
+        const userRecord = await findUserById(attendeeId);
+        const attendeePassId = crypto.randomBytes(16).toString('hex');
+        attendeeRecord = new Attendee({
+          name: userRecord?.name || 'Attendee',
+          email: userRecord?.email || '',
+          event: event._id,
+          userId: attendeeId,
+          passId: attendeePassId,
+          status: 'confirmed'
+        });
+      } else {
+        // Update existing record
+        const uniquePassId = crypto.randomBytes(16).toString('hex');
+        attendeeRecord.passId = uniquePassId;
+        attendeeRecord.status = 'confirmed';
+      }
+      // Generate QR code for the unique attendee passId
+      const attendeeQr = await QRCode.toDataURL(attendeeRecord.passId);
+      attendeeRecord.qrCode = attendeeQr;
+      await attendeeRecord.save();
+    } catch (bridgeErr) {
+      console.error('Failed to update Attendee bridge record:', bridgeErr.message);
+    }
     
     res.json({ message: 'Attendee confirmed' });
   } catch (error) {
@@ -432,7 +531,21 @@ router.post('/send-reminders', authenticate, requireOrganizer, async (req, res) 
       recipients = event.attendees.filter(a => a.status === 'pending');
     }
 
+    // Resolve real email addresses from Attendee records or identity models
+    let sentCount = 0;
     for (const attendee of recipients) {
+      let email = attendee.email;
+      if (!email && attendee.userId) {
+        const attRecord = await Attendee.findOne({ event: event._id, userId: attendee.userId });
+        if (attRecord && attRecord.email) {
+          email = attRecord.email;
+        } else {
+          const userRecord = await findUserById(attendee.userId);
+          if (userRecord) email = userRecord.email;
+        }
+      }
+      if (!email) continue;
+
       const emailHtml = `
         <h2>Event Reminder: ${event.title}</h2>
         <p><strong>Date:</strong> ${new Date(event.date).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
@@ -444,13 +557,14 @@ router.post('/send-reminders', authenticate, requireOrganizer, async (req, res) 
       
       await transporter.sendMail({
         from: process.env.EMAIL_USER,
-        to: attendee.email,
+        to: email,
         subject: `Reminder: ${event.title} Event`,
         html: emailHtml
       });
+      sentCount++;
     }
 
-    res.json({ message: `Reminders sent to ${recipients.length} attendees` });
+    res.json({ message: `Reminders sent to ${sentCount} attendees` });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

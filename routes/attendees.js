@@ -3,9 +3,10 @@ const router = express.Router();
 const Attendee = require('../models/Attendee');
 const Event = require('../models/Event');
 const crypto = require('crypto');
+const { authenticate, requireOrganizer } = require('../middleware/auth');
 
-// Get all attendees for an event
-router.get('/event/:eventId', async (req, res) => {
+// Get all attendees for an event (authenticated, organizer only)
+router.get('/event/:eventId', authenticate, requireOrganizer, async (req, res) => {
   try {
     const attendees = await Attendee.find({ event: req.params.eventId });
     res.json(attendees);
@@ -14,8 +15,8 @@ router.get('/event/:eventId', async (req, res) => {
   }
 });
 
-// Add attendee
-router.post('/', async (req, res) => {
+// Add attendee (authenticated, organizer only)
+router.post('/', authenticate, requireOrganizer, async (req, res) => {
   try {
     const { name, email, phone, event, guestCount, dietaryRestrictions, specialRequests } = req.body;
     
@@ -43,8 +44,8 @@ router.post('/', async (req, res) => {
   }
 });
 
-// Update attendee RSVP status
-router.put('/:id', async (req, res) => {
+// Update attendee RSVP status (authenticated, organizer only)
+router.put('/:id', authenticate, requireOrganizer, async (req, res) => {
   try {
     const { status } = req.body;
     const attendee = await Attendee.findById(req.params.id);
@@ -59,8 +60,8 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// Check in attendee
-router.put('/:id/checkin', async (req, res) => {
+// Check in attendee (authenticated, organizer only)
+router.put('/:id/checkin', authenticate, requireOrganizer, async (req, res) => {
   try {
     const attendee = await Attendee.findById(req.params.id);
     if (!attendee) return res.status(404).json({ message: 'Attendee not found' });
@@ -73,8 +74,8 @@ router.put('/:id/checkin', async (req, res) => {
   }
 });
 
-// Delete attendee
-router.delete('/:id', async (req, res) => {
+// Delete attendee (authenticated, organizer only)
+router.delete('/:id', authenticate, requireOrganizer, async (req, res) => {
   try {
     const attendee = await Attendee.findByIdAndDelete(req.params.id);
     if (!attendee) return res.status(404).json({ message: 'Attendee not found' });
@@ -86,8 +87,8 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-// Submit attendee info (RSVP, dietary, etc.)
-router.post('/info', async (req, res) => {
+// Submit attendee info (RSVP, dietary, etc.) — authenticated
+router.post('/info', authenticate, async (req, res) => {
   try {
     const { eventId, userId, rsvpStatus, guestCount, dietaryRestrictions, specialRequests } = req.body;
     
@@ -116,8 +117,8 @@ router.post('/info', async (req, res) => {
   }
 });
 
-// Check in attendee by pass ID
-router.post('/checkin/:eventId', async (req, res) => {
+// Check in attendee by pass ID (authenticated, organizer only)
+router.post('/checkin/:eventId', authenticate, requireOrganizer, async (req, res) => {
   try {
     const { passId } = req.body;
     const attendee = await Attendee.findOne({ event: req.params.eventId, passId });
@@ -127,6 +128,22 @@ router.post('/checkin/:eventId', async (req, res) => {
     attendee.checkInTime = new Date();
     attendee.status = 'checked-in';
     await attendee.save();
+
+    // Also update the Event.attendees[] status if this attendee has a userId
+    if (attendee.userId) {
+      try {
+        const event = await Event.findById(attendee.event);
+        if (event) {
+          const eventAttendee = event.attendees.find(a => a.userId.toString() === attendee.userId.toString());
+          if (eventAttendee) {
+            eventAttendee.status = 'checked-in';
+            await event.save();
+          }
+        }
+      } catch (syncErr) {
+        console.error('Failed to sync check-in to Event.attendees:', syncErr.message);
+      }
+    }
     
     res.json({ message: 'Checked in successfully', attendee });
   } catch (error) {

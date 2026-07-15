@@ -3,6 +3,7 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const { authenticate } = require('../middleware/auth');
 const { getAuthorizationUrl, getAccessTokenFromCode } = require('../utils/googleDrive');
 
 // PRODUCTION: Validate required environment variables
@@ -187,13 +188,18 @@ router.post('/reset-password', async (req, res) => {
   }
 });
 
-// Store Google Drive OAuth credentials
-router.post('/save-google-drive', async (req, res) => {
+// Store Google Drive OAuth credentials (authenticated, self only)
+router.post('/save-google-drive', authenticate, async (req, res) => {
   try {
     const { userId, accessToken, refreshToken } = req.body;
 
     if (!userId || !accessToken) {
       return res.status(400).json({ message: 'User ID and access token are required' });
+    }
+
+    // Only allow users to save tokens for themselves
+    if (userId !== req.user.id) {
+      return res.status(403).json({ message: 'You can only save tokens for your own account.' });
     }
 
     const user = await User.findUserById(userId);
@@ -221,9 +227,14 @@ router.post('/save-google-drive', async (req, res) => {
   }
 });
 
-// Get user Google Drive status
-router.get('/google-drive-status/:userId', async (req, res) => {
+// Get user Google Drive status (authenticated, self only)
+router.get('/google-drive-status/:userId', authenticate, async (req, res) => {
   try {
+    // Only allow users to check their own status
+    if (req.params.userId !== req.user.id) {
+      return res.status(403).json({ message: 'You can only check your own Drive status.' });
+    }
+
     const user = await User.findUserById(req.params.userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
@@ -333,13 +344,18 @@ router.get('/google-callback', async (req, res) => {
   }
 });
 
-// Save Google Drive Token (called from frontend after OAuth)
-router.post('/save-google-token', async (req, res) => {
+// Save Google Drive Token (called from frontend after OAuth) — authenticated, self only
+router.post('/save-google-token', authenticate, async (req, res) => {
   try {
     const { userId, accessToken, refreshToken, expiryDate } = req.body;
 
     if (!userId || !accessToken) {
       return res.status(400).json({ message: 'User ID and access token are required' });
+    }
+
+    // Only allow users to save tokens for themselves
+    if (userId !== req.user.id) {
+      return res.status(403).json({ message: 'You can only save tokens for your own account.' });
     }
 
     const user = await User.findUserById(userId);

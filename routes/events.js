@@ -172,7 +172,17 @@ router.put('/:id', authenticate, requireOrganizer, async (req, res) => {
       }
     }
 
-    Object.assign(event, req.body);
+    // Whitelist which fields can be updated — never blindly copy req.body
+    const ALLOWED_UPDATES = [
+      'title', 'description', 'date', 'startTime', 'endTime',
+      'location', 'venue', 'timeZone', 'dressCode', 'ageRestriction',
+      'additionalInfo', 'capacity', 'expectedAttendees'
+    ];
+    for (const field of ALLOWED_UPDATES) {
+      if (req.body[field] !== undefined) {
+        event[field] = req.body[field];
+      }
+    }
     event.updatedAt = Date.now();
     await event.save();
     const safe = sanitizeEvent(event, req.user.id);
@@ -571,7 +581,7 @@ router.post('/send-reminders', authenticate, requireOrganizer, async (req, res) 
 });
 
 // Upload photo DIRECTLY to Google Drive (NO server storage)
-router.post('/:eventId/photos', photoUpload.single('file'), async (req, res) => {
+router.post('/:eventId/photos', authenticate, photoUpload.single('file'), async (req, res) => {
   try {
     const { eventId } = req.params;
     const { passId, photoCaption, uploaderName } = req.body;
@@ -755,12 +765,12 @@ async function listEventPhotos(req, res) {
   }
 }
 
-router.get('/:eventId/photos', listEventPhotos);
-router.get('/:eventId/photos-list', listEventPhotos);
+router.get('/:eventId/photos', authenticate, listEventPhotos);
+router.get('/:eventId/photos-list', authenticate, listEventPhotos);
 
 // Proxy Google Drive image — serves the image bytes using the organizer's OAuth tokens
 // so the frontend <img> tag doesn't hit Google's auth wall.
-router.get('/:eventId/drive-image/:fileId', async (req, res) => {
+router.get('/:eventId/drive-image/:fileId', authenticate, async (req, res) => {
   try {
     const { eventId, fileId } = req.params;
 

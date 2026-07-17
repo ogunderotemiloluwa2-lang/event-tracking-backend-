@@ -95,11 +95,21 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// In-memory rate limiter for password reset (resets on server restart)
+const resetRateMap = new Map();
+
 // Forgot Password - Send Verification Code
 router.post('/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ message: 'Email is required' });
+
+    // Rate limit: max 1 request per 60 seconds per email
+    const lastRequest = resetRateMap.get(email.toLowerCase());
+    if (lastRequest && Date.now() - lastRequest < 60000) {
+      const remaining = Math.ceil((60000 - (Date.now() - lastRequest)) / 1000);
+      return res.status(429).json({ message: `Please wait ${remaining}s before requesting another code.` });
+    }
 
     const user = await User.findUserByEmail(email);
     if (!user) return res.status(400).json({ message: 'If email exists, you will receive a verification code' });
@@ -112,6 +122,8 @@ router.post('/forgot-password', async (req, res) => {
     user.resetCode = resetCode;
     user.resetCodeExpiry = resetCodeExpiry;
     await user.save();
+
+    resetRateMap.set(email.toLowerCase(), Date.now());
 
     console.log(`📧 Password reset code for ${email}: ${resetCode} (expires in 10 minutes)`);
 

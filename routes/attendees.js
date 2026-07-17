@@ -8,6 +8,12 @@ const { authenticate, requireOrganizer } = require('../middleware/auth');
 // Get all attendees for an event (authenticated, organizer only)
 router.get('/event/:eventId', authenticate, requireOrganizer, async (req, res) => {
   try {
+    // Verify the organizer owns this event
+    const event = await Event.findById(req.params.eventId);
+    if (!event) return res.status(404).json({ message: 'Event not found' });
+    if (event.createdBy.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'You can only view attendees for your own events.' });
+    }
     const attendees = await Attendee.find({ event: req.params.eventId });
     res.json(attendees);
   } catch (error) {
@@ -18,7 +24,14 @@ router.get('/event/:eventId', authenticate, requireOrganizer, async (req, res) =
 // Add attendee (authenticated, organizer only)
 router.post('/', authenticate, requireOrganizer, async (req, res) => {
   try {
-    const { name, email, phone, event, guestCount, dietaryRestrictions, specialRequests } = req.body;
+    const { name, email, phone, event: eventId, guestCount, dietaryRestrictions, specialRequests } = req.body;
+    
+    // Verify the organizer owns this event
+    const eventDoc = await Event.findById(eventId);
+    if (!eventDoc) return res.status(404).json({ message: 'Event not found' });
+    if (eventDoc.createdBy.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'You can only add attendees to your own events.' });
+    }
     
     const passId = crypto.randomBytes(16).toString('hex');
     
@@ -26,7 +39,7 @@ router.post('/', authenticate, requireOrganizer, async (req, res) => {
       name,
       email,
       phone,
-      event,
+      event: eventId,
       passId,
       guestCount,
       dietaryRestrictions,
@@ -34,9 +47,6 @@ router.post('/', authenticate, requireOrganizer, async (req, res) => {
     });
 
     await attendee.save();
-
-    // Add attendee to event
-    await Event.findByIdAndUpdate(event, { $push: { attendees: attendee._id } });
 
     res.status(201).json(attendee);
   } catch (error) {
@@ -50,6 +60,12 @@ router.put('/:id', authenticate, requireOrganizer, async (req, res) => {
     const { status } = req.body;
     const attendee = await Attendee.findById(req.params.id);
     if (!attendee) return res.status(404).json({ message: 'Attendee not found' });
+
+    // Verify the organizer owns the event this attendee belongs to
+    const event = await Event.findById(attendee.event);
+    if (!event || event.createdBy.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'You can only update attendees for your own events.' });
+    }
 
     attendee.status = status;
     attendee.updatedAt = Date.now();
@@ -66,7 +82,14 @@ router.put('/:id/checkin', authenticate, requireOrganizer, async (req, res) => {
     const attendee = await Attendee.findById(req.params.id);
     if (!attendee) return res.status(404).json({ message: 'Attendee not found' });
 
+    // Verify the organizer owns the event this attendee belongs to
+    const event = await Event.findById(attendee.event);
+    if (!event || event.createdBy.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'You can only check in attendees for your own events.' });
+    }
+
     attendee.checkInTime = new Date();
+    attendee.status = 'checked-in';
     await attendee.save();
     res.json({ message: 'Checked in successfully', attendee });
   } catch (error) {
@@ -77,10 +100,16 @@ router.put('/:id/checkin', authenticate, requireOrganizer, async (req, res) => {
 // Delete attendee (authenticated, organizer only)
 router.delete('/:id', authenticate, requireOrganizer, async (req, res) => {
   try {
-    const attendee = await Attendee.findByIdAndDelete(req.params.id);
+    const attendee = await Attendee.findById(req.params.id);
     if (!attendee) return res.status(404).json({ message: 'Attendee not found' });
-    
-    await Event.findByIdAndUpdate(attendee.event, { $pull: { attendees: attendee._id } });
+
+    // Verify the organizer owns the event this attendee belongs to
+    const event = await Event.findById(attendee.event);
+    if (!event || event.createdBy.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'You can only delete attendees for your own events.' });
+    }
+
+    await Attendee.findByIdAndDelete(req.params.id);
     res.json({ message: 'Attendee removed' });
   } catch (error) {
     res.status(500).json({ message: error.message });

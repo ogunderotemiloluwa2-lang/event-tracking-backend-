@@ -4,6 +4,7 @@ const Attendee = require('../models/Attendee');
 const Event = require('../models/Event');
 const crypto = require('crypto');
 const { authenticate, requireOrganizer } = require('../middleware/auth');
+const { findUserById } = require('../models/User');
 
 // Get all attendees for an event (authenticated, organizer only)
 router.get('/event/:eventId', authenticate, requireOrganizer, async (req, res) => {
@@ -14,7 +15,35 @@ router.get('/event/:eventId', authenticate, requireOrganizer, async (req, res) =
     if (event.createdBy.toString() !== req.user.id) {
       return res.status(403).json({ message: 'You can only view attendees for your own events.' });
     }
-    const attendees = await Attendee.find({ event: req.params.eventId });
+    let attendees = await Attendee.find({ event: req.params.eventId });
+
+    // Sync: ensure every entry in Event.attendees[] has a corresponding
+    // Attendee record, so analytics and management show accurate counts.
+    const attendeeUserIds = new Set(attendees.filter(a => a.userId).map(a => a.userId.toString()));
+    for (const entry of event.attendees) {
+      if (entry.userId && !attendeeUserIds.has(entry.userId.toString())) {
+        try {
+          const userRecord = await findUserById(entry.userId);
+          if (userRecord) {
+            const passId = crypto.randomBytes(16).toString('hex');
+            const newAttendee = new Attendee({
+              name: userRecord.name || 'Attendee',
+              email: userRecord.email || '',
+              event: event._id,
+              userId: entry.userId,
+              passId,
+              status: entry.status || 'pending'
+            });
+            await newAttendee.save();
+            attendees.push(newAttendee);
+            attendeeUserIds.add(entry.userId.toString());
+          }
+        } catch (syncErr) {
+          console.error('Failed to sync attendee:', syncErr.message);
+        }
+      }
+    }
+
     res.json(attendees);
   } catch (error) {
     res.status(500).json({ message: error.message });

@@ -64,4 +64,51 @@ function sanitizeEvents(events, userId) {
   return events.map(event => sanitizeEvent(event, userId));
 }
 
-module.exports = { authenticate, requireOrganizer, sanitizeEvent, sanitizeEvents };
+/**
+ * Strip ALL sensitive fields from an event for public/anonymous access.
+ * This is stricter than sanitizeEvent(null) — it removes organizer emails,
+ * attendee records, passId, QR codes, and Google Drive information.
+ * Used by public endpoints like GET /api/events and GET /by-passid/:passId.
+ */
+function sanitizePublicEvent(event) {
+  const obj = event.toObject ? event.toObject() : { ...event };
+
+  // Remove all credential/secret fields
+  delete obj.passId;
+  delete obj.qrCode;
+  delete obj.googleDriveFolderLink;
+  delete obj.googleDriveFolderId;
+
+  // Remove organizer email — keep only name and organization
+  if (obj.createdBy && typeof obj.createdBy === 'object') {
+    delete obj.createdBy.email;
+  }
+
+  // Replace full attendees array with just a count
+  // (attendee records contain userId, status, joinedAt — all private)
+  if (Array.isArray(obj.attendees)) {
+    obj.attendeeCount = obj.attendees.length;
+    delete obj.attendees;
+  }
+
+  // Remove deprecated photos field
+  delete obj.photos;
+
+  return obj;
+}
+
+/**
+ * Strip sensitive fields from an array of events for public/anonymous access.
+ */
+function sanitizePublicEvents(events) {
+  return events.map(event => sanitizePublicEvent(event));
+}
+
+module.exports = {
+  authenticate,
+  requireOrganizer,
+  sanitizeEvent,
+  sanitizeEvents,
+  sanitizePublicEvent,
+  sanitizePublicEvents
+};

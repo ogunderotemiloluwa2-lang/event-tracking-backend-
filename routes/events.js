@@ -7,7 +7,7 @@ const { findUserById } = require('../models/User');
 const QRCode = require('qrcode');
 const nodemailer = require('nodemailer');
 const multer = require('multer');
-const { authenticate, requireOrganizer, sanitizeEvent, sanitizeEvents } = require('../middleware/auth');
+const { authenticate, requireOrganizer, sanitizeEvent, sanitizeEvents, sanitizePublicEvent, sanitizePublicEvents } = require('../middleware/auth');
 const { uploadPhotoToGoogleDrive, getPhotosFromGoogleDrive, extractFolderId, verifyFolderWriteAccess, getAuthenticatedClient, refreshAndPersistToken } = require('../utils/googleDrive');
 
 // Local multer for photo uploads only (not applied globally)
@@ -20,8 +20,8 @@ const photoUpload = multer({
 router.get('/', async (req, res) => {
   try {
     const events = await Event.find().populate('createdBy', 'name email organization').populate('attendees');
-    // Strip all Google Drive data before sending to client
-    const safe = sanitizeEvents(events, null);
+    // Strip all sensitive data for anonymous/public access
+    const safe = sanitizePublicEvents(events);
     res.json(safe);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -307,10 +307,10 @@ router.get('/by-passid/:passId', async (req, res) => {
     
     if (!event) return res.status(404).json({ message: 'Event not found' });
     
-    const safe = sanitizeEvent(event, null);
+    const safe = sanitizePublicEvent(event);
     const response = {
       ...safe,
-      organizer: event.createdBy,
+      organizer: { name: event.createdBy?.name, organization: event.createdBy?.organization },
       attendeeCount: event.attendees.length,
       confirmedCount: event.attendees.filter(a => a.status === 'confirmed').length
     };
@@ -354,7 +354,7 @@ router.get('/by-user/:userId', authenticate, async (req, res) => {
     }
     const events = await Event.find({ 'attendees.userId': targetUserId })
       .populate('createdBy', 'name email organization');
-    const safe = sanitizeEvents(events, null);
+    const safe = sanitizeEvents(events, req.user.id);
     res.json(safe);
   } catch (error) {
     res.status(500).json({ message: error.message });

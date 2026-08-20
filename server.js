@@ -11,9 +11,15 @@ dns.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1', '1.0.0.1']);
 const app = express();
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: true,
+  credentials: true
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Handle CORS preflight requests
+app.options('*', cors());
 
 // Routes
 app.use('/api/events', require('./routes/events'));

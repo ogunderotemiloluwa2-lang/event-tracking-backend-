@@ -91,9 +91,6 @@ function sanitizePublicEvent(event) {
     delete obj.attendees;
   }
 
-  // Remove deprecated photos field
-  delete obj.photos;
-
   return obj;
 }
 

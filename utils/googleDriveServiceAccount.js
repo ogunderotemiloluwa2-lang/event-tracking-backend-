@@ -1,29 +1,32 @@
 const { google } = require('googleapis');
 const { Readable } = require('stream');
+const logger = require('./logger');
 
 // Service account credentials from environment
 let serviceAccountKey = null;
+let drive = null;
+
 try {
   const keyString = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
   if (keyString) {
     serviceAccountKey = typeof keyString === 'string' ? JSON.parse(keyString) : keyString;
-    console.log('✅ Google Service Account loaded from GOOGLE_SERVICE_ACCOUNT_KEY');
+    logger.info('Google Service Account loaded from GOOGLE_SERVICE_ACCOUNT_KEY');
   }
 } catch (err) {
-  console.warn('⚠️ Could not parse GOOGLE_SERVICE_ACCOUNT_KEY:', err.message);
+  logger.warn('Could not parse GOOGLE_SERVICE_ACCOUNT_KEY', { error: err.message });
 }
 
-if (!serviceAccountKey || !serviceAccountKey.private_key) {
-  throw new Error('❌ CRITICAL: Google Service Account credentials not found in .env file\nSet GOOGLE_SERVICE_ACCOUNT_KEY environment variable with your service account JSON');
+if (serviceAccountKey && serviceAccountKey.private_key) {
+  // Initialize Google Auth
+  const auth = new google.auth.GoogleAuth({
+    credentials: serviceAccountKey,
+    scopes: ['https://www.googleapis.com/auth/drive']
+  });
+
+  drive = google.drive({ version: 'v3', auth });
+} else {
+  logger.warn('Google Service Account credentials not found in .env — service account features disabled');
 }
-
-// Initialize Google Auth
-const auth = new google.auth.GoogleAuth({
-  credentials: serviceAccountKey,
-  scopes: ['https://www.googleapis.com/auth/drive']
-});
-
-const drive = google.drive({ version: 'v3', auth });
 
 /**
  * Upload photo to Google Drive folder
@@ -36,13 +39,15 @@ const drive = google.drive({ version: 'v3', auth });
  */
 const uploadPhotoToGoogleDrive = async (folderId, fileBuffer, fileName, uploaderName, photoCaption) => {
   try {
+    if (!drive) {
+      throw new Error('Google Service Account not configured');
+    }
+
     if (!folderId) {
       throw new Error('Google Drive folder ID is required');
     }
 
-    console.log(`📤 Uploading to Google Drive folder: ${folderId}`);
-    console.log(`   File: ${fileName}`);
-    console.log(`   Uploader: ${uploaderName}`);
+    logger.info(`Uploading to Google Drive folder: ${folderId}`, { fileName, uploaderName });
 
     // Create a readable stream from the buffer
     const stream = Readable.from(fileBuffer);
@@ -67,9 +72,7 @@ const uploadPhotoToGoogleDrive = async (folderId, fileBuffer, fileName, uploader
       fields: 'id, webViewLink, createdTime, mimeType, size, name'
     });
 
-    console.log('✅ Successfully uploaded to Google Drive');
-    console.log(`   File ID: ${response.data.id}`);
-    console.log(`   Link: ${response.data.webViewLink}`);
+    logger.info('Successfully uploaded to Google Drive', { fileId: response.data.id, link: response.data.webViewLink });
 
     return {
       success: true,
@@ -83,7 +86,7 @@ const uploadPhotoToGoogleDrive = async (folderId, fileBuffer, fileName, uploader
       photoCaption: photoCaption
     };
   } catch (err) {
-    console.error('❌ Google Drive upload error:', err.message);
+    logger.error('Google Drive upload error', { error: err.message });
     return {
       success: false,
       error: err.message,
@@ -99,11 +102,15 @@ const uploadPhotoToGoogleDrive = async (folderId, fileBuffer, fileName, uploader
  */
 const getPhotosFromGoogleDrive = async (folderId) => {
   try {
+    if (!drive) {
+      throw new Error('Google Service Account not configured');
+    }
+
     if (!folderId) {
       throw new Error('Google Drive folder ID is required');
     }
 
-    console.log(`📸 Fetching photos from Google Drive folder: ${folderId}`);
+    logger.info(`Fetching photos from Google Drive folder: ${folderId}`);
 
     const response = await drive.files.list({
       q: `'${folderId}' in parents and mimeType='image/jpeg' and trashed=false`,
@@ -113,10 +120,10 @@ const getPhotosFromGoogleDrive = async (folderId) => {
       orderBy: 'createdTime desc'
     });
 
-    console.log(`✅ Retrieved ${response.data.files.length} photos from Google Drive`);
+    logger.info(`Retrieved ${response.data.files.length} photos from Google Drive`);
     return response.data.files;
   } catch (err) {
-    console.error('❌ Error fetching photos from Google Drive:', err.message);
+    logger.error('Error fetching photos from Google Drive', { error: err.message });
     throw err;
   }
 };
@@ -128,16 +135,16 @@ const getPhotosFromGoogleDrive = async (folderId) => {
  */
 const deletePhotoFromGoogleDrive = async (fileId) => {
   try {
-    console.log(`🗑️ Deleting file from Google Drive: ${fileId}`);
+    logger.info(`Deleting file from Google Drive: ${fileId}`);
     
     await drive.files.delete({
       fileId: fileId
     });
 
-    console.log(`✅ Successfully deleted: ${fileId}`);
+    logger.info(`Successfully deleted: ${fileId}`);
     return true;
   } catch (err) {
-    console.error('❌ Error deleting from Google Drive:', err.message);
+    logger.error('Error deleting from Google Drive', { error: err.message });
     throw err;
   }
 };

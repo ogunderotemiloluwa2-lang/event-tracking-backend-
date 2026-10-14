@@ -2,9 +2,13 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
+const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const { authenticate } = require('../middleware/auth');
 const { getAuthorizationUrl, getAccessTokenFromCode } = require('../utils/googleDrive');
+const logger = require('../utils/logger');
+const audit = require('../utils/auditLog');
 
 // PRODUCTION: Validate required environment variables
 if (!process.env.JWT_SECRET) {
@@ -15,7 +19,40 @@ if (!process.env.JWT_SECRET) {
   );
 }
 
+// Validate JWT secret strength
+if (process.env.JWT_SECRET.length < 32) {
+  throw new Error(
+    '❌ CRITICAL ERROR: JWT_SECRET is too weak (minimum 32 characters)\n' +
+    'Generate a strong secret with: openssl rand -base64 32'
+  );
+}
+
 const JWT_SECRET = process.env.JWT_SECRET;
+
+// Rate limiters for auth endpoints
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // max 5 login attempts per IP per window
+  message: { message: 'Too many login attempts. Please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 3, // max 3 registrations per IP per hour
+  message: { message: 'Too many registration attempts. Please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const resetLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 3, // max 3 password reset requests per IP per hour
+  message: { message: 'Too many password reset requests. Please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // Normalize emails so sign-in is not broken by capitalization/whitespace
 // (mobile keyboards often auto-capitalize the first letter of an email).
@@ -23,8 +60,19 @@ const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // Register
-router.post('/register', async (req, res) => {
+router.post('/register', registerLimiter, [
+  body('name').trim().isLength({ min: 1, max: 100 }).withMessage('Name is required').escape(),
+  body('email').isEmail().withMessage('A valid email is required').normalizeEmail(),
+  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+  body('phone').optional().trim().escape(),
+  body('organization').optional().trim().escape(),
+], async (req, res) => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ message: errors.array()[0].msg });
+    }
+
     const { name, email, password, role, phone, organization } = req.body;
     if (!name || !email || !password) return res.status(400).json({ message: 'Missing fields' });
 
@@ -54,6 +102,8 @@ router.post('/register', async (req, res) => {
 
     await user.save();
 
+    audit('user_registered', { userId: user._id, email: user.email, role: user.role });
+
     const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
     res.json({
       token,
@@ -63,14 +113,25 @@ router.post('/register', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error(err);
+    logger.error("Auth error", { error: err.message });
     res.status(500).json({ message: 'Server error' });
   }
 });
 
 // Login
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, [
+  body('email').isEmail().withMessage('Email is required').normalizeEmail(),
+  body('password').notEmpty().withMessage('Password is required'),
+], async (req, res) => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      // Keep the response generic so it cannot be used to enumerate accounts,
+      // but surface which field was missing for legitimate client errors.
+      const missing = errors.array().some((e) => e.path === 'email' || e.path === 'password');
+      return res.status(400).json({ message: missing ? 'Email and password are required' : 'Invalid credentials' });
+    }
+
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ message: 'Missing fields' });
 
@@ -79,7 +140,12 @@ router.post('/login', async (req, res) => {
     if (!user) return res.status(400).json({ message: 'Invalid credentials' });
 
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(400).json({ message: 'Invalid credentials' });
+    if (!isMatch) {
+      audit('login_failed', { email: normalizedEmail, reason: 'invalid_password' });
+      return res.status(400).json({ message: 'Invalid credentials' });
+    }
+
+    audit('login_success', { userId: user._id, email: user.email, role: user.role });
 
     const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
     res.json({
@@ -90,7 +156,7 @@ router.post('/login', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error(err);
+    logger.error("Auth error", { error: err.message });
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -99,13 +165,22 @@ router.post('/login', async (req, res) => {
 const resetRateMap = new Map();
 
 // Forgot Password - Send Verification Code
-router.post('/forgot-password', async (req, res) => {
+router.post('/forgot-password', resetLimiter, [
+  body('email').isEmail().withMessage('A valid email is required').normalizeEmail(),
+], async (req, res) => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ message: 'A valid email is required' });
+    }
+
     const { email } = req.body;
     if (!email) return res.status(400).json({ message: 'Email is required' });
 
+    const normalizedEmail = normalizeEmail(email);
+
     // Rate limit: max 1 request per 60 seconds per email
-    const lastRequest = resetRateMap.get(email.toLowerCase());
+    const lastRequest = resetRateMap.get(normalizedEmail);
     if (lastRequest && Date.now() - lastRequest < 60000) {
       const remaining = Math.ceil((60000 - (Date.now() - lastRequest)) / 1000);
       return res.status(429).json({ message: `Please wait ${remaining}s before requesting another code.` });
@@ -123,20 +198,31 @@ router.post('/forgot-password', async (req, res) => {
     user.resetCodeExpiry = resetCodeExpiry;
     await user.save();
 
-    resetRateMap.set(email.toLowerCase(), Date.now());
+    resetRateMap.set(normalizedEmail, Date.now());
 
-    console.log(`📧 Password reset code for ${email}: ${resetCode} (expires in 10 minutes)`);
+    audit('password_reset_requested', { email: normalizedEmail });
+
+    // Never log the code itself — logs are shipped off-box in production.
+    logger.info('Password reset code issued', { email: normalizedEmail, expiresInMinutes: 10 });
 
     res.json({ message: 'A 6-digit verification code has been sent to your email. Valid for 10 minutes.' });
   } catch (err) {
-    console.error(err);
+    logger.error("Auth error", { error: err.message });
     res.status(500).json({ message: 'Server error' });
   }
 });
 
 // Verify Reset Code
-router.post('/verify-code', async (req, res) => {
+router.post('/verify-code', [
+  body('email').isEmail().normalizeEmail(),
+  body('code').isLength({ min: 6, max: 6 }).isNumeric(),
+], async (req, res) => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ message: 'Valid email and 6-digit code are required' });
+    }
+
     const { email, code } = req.body;
     if (!email || !code) return res.status(400).json({ message: 'Email and code are required' });
 
@@ -154,14 +240,24 @@ router.post('/verify-code', async (req, res) => {
 
     res.json({ message: 'Code verified successfully. You can now reset your password.' });
   } catch (err) {
-    console.error(err);
+    logger.error("Auth error", { error: err.message });
     res.status(500).json({ message: 'Server error' });
   }
 });
 
 // Reset Password
-router.post('/reset-password', async (req, res) => {
+router.post('/reset-password', [
+  body('email').isEmail().normalizeEmail(),
+  body('code').isLength({ min: 6, max: 6 }).isNumeric(),
+  body('newPassword').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+  body('confirmPassword').notEmpty(),
+], async (req, res) => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ message: errors.array()[0].msg });
+    }
+
     const { email, code, newPassword, confirmPassword } = req.body;
     if (!email || !code || !newPassword || !confirmPassword) {
       return res.status(400).json({ message: 'All fields are required' });
@@ -193,9 +289,11 @@ router.post('/reset-password', async (req, res) => {
     user.resetCodeExpiry = null;
     await user.save();
 
+    audit('password_reset_completed', { userId: user._id, email: user.email });
+
     res.json({ message: 'Password reset successfully. You can now login with your new password.' });
   } catch (err) {
-    console.error(err);
+    logger.error("Auth error", { error: err.message });
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -234,7 +332,7 @@ router.post('/save-google-drive', authenticate, async (req, res) => {
       }
     });
   } catch (err) {
-    console.error(err);
+    logger.error("Auth error", { error: err.message });
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -255,7 +353,7 @@ router.get('/google-drive-status/:userId', authenticate, async (req, res) => {
       accessToken: user.googleAccessToken ? 'configured' : null
     });
   } catch (err) {
-    console.error(err);
+    logger.error("Auth error", { error: err.message });
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -269,10 +367,10 @@ router.get('/google-auth-url', async (req, res) => {
       return res.status(500).json({ message: 'Google OAuth not configured' });
     }
 
-    console.log('📌 Google Auth URL generated');
+    logger.info("Google Auth URL generated");
     res.json({ authUrl });
   } catch (err) {
-    console.error('Error getting Google auth URL:', err);
+    logger.error('Error getting Google auth URL', { error: err.message });
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -290,18 +388,18 @@ router.get('/google-callback', async (req, res) => {
     // via window.opener.postMessage without being blocked by browser security policies.
     res.set('Cross-Origin-Opener-Policy', 'unsafe-none');
 
-    console.log('🔐 Google OAuth callback received');
-    console.log('   Code:', code.substring(0, 20) + '...');
+    logger.info("Google OAuth callback received");
+    logger.info("Code received", { code: code.substring(0, 20) + "..." });
 
     // Get access token using authorization code
     const tokenResult = await getAccessTokenFromCode(code);
 
     if (!tokenResult.success) {
-      console.error('❌ Failed to get access token:', tokenResult.error);
+      logger.error('Failed to get access token', { error: tokenResult.error });
       return res.status(400).send(`<h1>Authorization Failed</h1><p>${tokenResult.error}</p>`);
     }
 
-    console.log('✅ Access token obtained');
+    logger.info("Access token obtained");
     const { accessToken, refreshToken, expiryDate } = tokenResult;
 
     // Return a friendly success page.
@@ -351,7 +449,7 @@ router.get('/google-callback', async (req, res) => {
     res.send(htmlResponse);
 
   } catch (err) {
-    console.error('Error in Google callback:', err);
+    logger.error("Error in Google callback", { error: err.message });
     res.status(500).send('<h1>Server Error</h1><p>' + err.message + '</p>');
   }
 });
@@ -373,7 +471,7 @@ router.post('/save-google-token', authenticate, async (req, res) => {
     const user = await User.findUserById(userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
-    console.log('💾 Saving Google token for user:', user.email);
+    logger.info("Saving Google token for user", { email: user.email });
     
     // Save tokens
     user.googleAccessToken = accessToken;
@@ -385,7 +483,9 @@ router.post('/save-google-token', authenticate, async (req, res) => {
     }
     await user.save();
 
-    console.log('✅ Google token saved successfully');
+    audit('google_drive_connected', { userId: user._id, email: user.email });
+
+    logger.info("Google token saved successfully");
 
     res.json({ 
       message: 'Google Drive authenticated successfully',
@@ -397,7 +497,7 @@ router.post('/save-google-token', authenticate, async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('Error saving Google token:', err);
+    logger.error("Error saving Google token", { error: err.message });
     res.status(500).json({ message: 'Server error: ' + err.message });
   }
 });

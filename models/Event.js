@@ -38,11 +38,6 @@ const eventSchema = new mongoose.Schema({
     status: { type: String, enum: ['pending', 'confirmed', 'checked-in'], default: 'pending' },
     joinedAt: Date
   }],
-  photos: {
-    type: String,
-    default: 'Photos are now stored directly in Google Drive. See googleDriveFolderLink.',
-    deprecated: true
-  },
   googleDriveFolderLink: {
     type: String,
     description: 'Shared Google Drive folder link where photos will be uploaded'

@@ -5,6 +5,7 @@ const Event = require('../models/Event');
 const crypto = require('crypto');
 const { authenticate, requireOrganizer } = require('../middleware/auth');
 const { findUserById } = require('../models/User');
+const logger = require('../utils/logger');
 
 // Get all attendees for an event (authenticated, organizer only)
 router.get('/event/:eventId', authenticate, requireOrganizer, async (req, res) => {
@@ -39,7 +40,7 @@ router.get('/event/:eventId', authenticate, requireOrganizer, async (req, res) =
             attendeeUserIds.add(entry.userId.toString());
           }
         } catch (syncErr) {
-          console.error('Failed to sync attendee:', syncErr.message);
+          logger.error('Failed to sync attendee', { error: syncErr.message });
         }
       }
     }
@@ -199,7 +200,7 @@ router.post('/checkin/:eventId', authenticate, requireOrganizer, async (req, res
           }
         }
       } catch (syncErr) {
-        console.error('Failed to sync check-in to Event.attendees:', syncErr.message);
+        logger.error('Failed to sync check-in to Event.attendees', { error: syncErr.message });
       }
     }
     

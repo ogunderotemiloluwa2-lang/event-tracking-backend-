@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
 const Event = require('../models/Event');
 const Attendee = require('../models/Attendee');
 const { findUserById } = require('../models/User');
@@ -8,7 +9,19 @@ const QRCode = require('qrcode');
 const nodemailer = require('nodemailer');
 const multer = require('multer');
 const { authenticate, requireOrganizer, sanitizeEvent, sanitizeEvents, sanitizePublicEvent, sanitizePublicEvents } = require('../middleware/auth');
+const logger = require('../utils/logger');
+const audit = require('../utils/auditLog');
 const { uploadPhotoToGoogleDrive, getPhotosFromGoogleDrive, extractFolderId, verifyFolderWriteAccess, getAuthenticatedClient, refreshAndPersistToken } = require('../utils/googleDrive');
+const { google } = require('googleapis');
+
+// Rate limiter for photo uploads — prevent abuse
+const photoUploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 50, // max 50 uploads per IP per hour
+  message: { message: 'Too many photo uploads. Please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // Local multer for photo uploads only (not applied globally)
 const photoUpload = multer({
@@ -19,12 +32,33 @@ const photoUpload = multer({
 // Get all events (public — only non-sensitive fields)
 router.get('/', async (req, res) => {
   try {
-    const events = await Event.find().populate('createdBy', 'name email organization').populate('attendees');
-    // Strip all sensitive data for anonymous/public access
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
+    const skip = (page - 1) * limit;
+
+    const [events, total] = await Promise.all([
+      Event.find()
+        .populate('createdBy', 'name email organization')
+        .populate('attendees')
+        .skip(skip)
+        .limit(limit)
+        .sort({ createdAt: -1 }),
+      Event.countDocuments()
+    ]);
+
     const safe = sanitizePublicEvents(events);
-    res.json(safe);
+    res.json({
+      events: safe,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    logger.error('Error fetching events', { error: error.message });
+    res.status(500).json({ message: 'Failed to fetch events' });
   }
 });
 
@@ -72,12 +106,12 @@ router.post('/', authenticate, async (req, res) => {
           hint: 'Please provide a valid Google Drive folder link like: https://drive.google.com/drive/folders/FOLDER_ID'
         });
       }
-      console.log('✅ Extracted Google Drive Folder ID:', googleDriveFolderId);
+      logger.info('Extracted Google Drive Folder ID', { folderId: googleDriveFolderId });
 
       // Validate that the organizer can write to this folder
       const organizer = await findUserById(organizerId);
       if (organizer && (organizer.googleRefreshToken || organizer.googleAccessToken)) {
-        console.log('🔍 Validating folder write access...');
+        logger.info('Validating folder write access...');
         const validation = await verifyFolderWriteAccess({
           folderId: googleDriveFolderId,
           accessToken: organizer.googleAccessToken,
@@ -94,9 +128,9 @@ router.post('/', authenticate, async (req, res) => {
             code: validation.code
           });
         }
-        console.log('✅ Folder write access verified');
+        logger.info('Folder write access verified');
       } else {
-        console.log('⚠️ Google Drive not connected — skipping folder validation. Photos will fail until Drive is connected.');
+        logger.warn('Google Drive not connected — skipping folder validation. Photos will fail until Drive is connected.');
       }
     }
     
@@ -123,6 +157,7 @@ router.post('/', authenticate, async (req, res) => {
     });
 
     await event.save();
+    audit('event_created', { eventId: event._id, title: event.title, organizerId: req.user.id });
     // Strip Drive data from response
     const safe = sanitizeEvent(event, req.user.id);
     res.status(201).json(safe);
@@ -149,7 +184,7 @@ router.put('/:id', authenticate, requireOrganizer, async (req, res) => {
         // Validate the folder is writable by the organizer
         const organizer = await findUserById(req.user.id);
         if (organizer && (organizer.googleRefreshToken || organizer.googleAccessToken)) {
-          console.log('🔍 Validating folder write access on update...');
+          logger.info('Validating folder write access on update...');
           const validation = await verifyFolderWriteAccess({
             folderId,
             accessToken: organizer.googleAccessToken,
@@ -166,7 +201,7 @@ router.put('/:id', authenticate, requireOrganizer, async (req, res) => {
               code: validation.code
             });
           }
-          console.log('✅ Folder write access verified on update');
+          logger.info('Folder write access verified on update');
         }
         event.googleDriveFolderId = folderId;
       }
@@ -185,6 +220,7 @@ router.put('/:id', authenticate, requireOrganizer, async (req, res) => {
     }
     event.updatedAt = Date.now();
     await event.save();
+    audit('event_updated', { eventId: event._id, title: event.title, organizerId: req.user.id });
     const safe = sanitizeEvent(event, req.user.id);
     res.json(safe);
   } catch (error) {
@@ -204,6 +240,7 @@ router.delete('/:id', authenticate, requireOrganizer, async (req, res) => {
     }
 
     await Event.findByIdAndDelete(req.params.id);
+    audit('event_deleted', { eventId: req.params.id, title: event.title, organizerId: req.user.id });
     res.json({ message: 'Event deleted' });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -411,7 +448,7 @@ router.post('/join-by-passid', authenticate, async (req, res) => {
       }
     } catch (bridgeErr) {
       // Non-critical: the join succeeded in Event.attendees[]
-      console.error('Failed to create Attendee bridge record:', bridgeErr.message);
+      logger.error('Failed to create Attendee bridge record', { error: bridgeErr.message });
     }
 
     res.json({ message: 'Successfully joined event' });
@@ -447,7 +484,7 @@ router.post('/leave-by-passid', authenticate, async (req, res) => {
     try {
       await Attendee.findOneAndDelete({ event: event._id, userId });
     } catch (bridgeErr) {
-      console.error('Failed to remove Attendee bridge record:', bridgeErr.message);
+      logger.error('Failed to remove Attendee bridge record', { error: bridgeErr.message });
     }
 
     res.json({ message: 'Successfully left event' });
@@ -501,7 +538,7 @@ router.post('/:eventId/confirm-attendee', authenticate, requireOrganizer, async 
       attendeeRecord.qrCode = attendeeQr;
       await attendeeRecord.save();
     } catch (bridgeErr) {
-      console.error('Failed to update Attendee bridge record:', bridgeErr.message);
+      logger.error('Failed to update Attendee bridge record', { error: bridgeErr.message });
     }
     
     res.json({ message: 'Attendee confirmed' });
@@ -581,18 +618,24 @@ router.post('/send-reminders', authenticate, requireOrganizer, async (req, res) 
 });
 
 // Upload photo DIRECTLY to Google Drive (NO server storage)
-router.post('/:eventId/photos', authenticate, photoUpload.single('file'), async (req, res) => {
+router.post('/:eventId/photos', authenticate, photoUploadLimiter, photoUpload.single('file'), async (req, res) => {
   try {
     const { eventId } = req.params;
     const { passId, photoCaption, uploaderName } = req.body;
     const file = req.file;
 
-    console.log('\n📸 PHOTO UPLOAD REQUEST RECEIVED');
-    console.log('   Event ID:', eventId);
-    console.log('   File:', file?.originalname);
+    logger.info('PHOTO UPLOAD REQUEST RECEIVED');
+    logger.info('Event ID', { eventId });
+    logger.info('File', { name: file?.originalname });
 
     if (!file) {
       return res.status(400).json({ message: 'No file provided' });
+    }
+
+    // Validate MIME type — only allow images
+    const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    if (!allowedMimeTypes.includes(file.mimetype)) {
+      return res.status(400).json({ message: 'Only image files (JPEG, PNG, GIF, WebP) are allowed' });
     }
 
     if (!eventId || !passId) {
@@ -605,7 +648,7 @@ router.post('/:eventId/photos', authenticate, photoUpload.single('file'), async 
       return res.status(404).json({ message: 'Event not found' });
     }
 
-    console.log('   Event found:', event.title);
+    logger.info('Event found', { title: event.title });
 
     // Check if event has Google Drive folder configured
     if (!event.googleDriveFolderId) {
@@ -624,11 +667,11 @@ router.post('/:eventId/photos', authenticate, photoUpload.single('file'), async 
       });
     }
 
-    console.log('   Google Drive Folder ID:', event.googleDriveFolderId);
-    console.log('   Uploading as organizer:', organizer.email);
+    logger.info('Google Drive Folder ID', { folderId: event.googleDriveFolderId });
+    logger.info('Uploading as organizer', { email: organizer.email });
 
     // Upload DIRECTLY to the organizer's Google Drive
-    console.log('📤 Uploading to Google Drive...');
+    logger.info('Uploading to Google Drive...');
     const uploadResult = await uploadPhotoToGoogleDrive({
       folderId: event.googleDriveFolderId,
       fileBuffer: file.buffer,
@@ -640,7 +683,8 @@ router.post('/:eventId/photos', authenticate, photoUpload.single('file'), async 
       mimeType: file.mimetype || 'image/jpeg',
       photoCaption,
       uploaderName: uploaderName || 'Guest',
-      eventId: event._id.toString()  // tag photo with event ID so we can filter by it
+      eventId: event._id.toString(),  // tag photo with event ID so we can filter by it
+      passId: passId || ''            // tag with uploader's pass ID so they can manage their own photos
     });
 
     if (!uploadResult.success) {
@@ -661,9 +705,11 @@ router.post('/:eventId/photos', authenticate, photoUpload.single('file'), async 
       });
     }
 
-    console.log('✅ PHOTO UPLOADED TO GOOGLE DRIVE SUCCESSFULLY');
-    console.log('   File ID:', uploadResult.fileId);
-    console.log('   URL:', uploadResult.fileLink);
+    logger.info('PHOTO UPLOADED TO GOOGLE DRIVE SUCCESSFULLY');
+    logger.info('File ID', { fileId: uploadResult.fileId });
+    logger.info('URL', { url: uploadResult.fileLink });
+
+    audit('photo_uploaded', { eventId: eventId, fileId: uploadResult.fileId, uploaderName: uploaderName || 'Guest' });
 
     // Return success with Google Drive URL
     res.json({ 
@@ -678,8 +724,8 @@ router.post('/:eventId/photos', authenticate, photoUpload.single('file'), async 
     });
 
   } catch (error) {
-    console.error('❌ Photo upload error:', error.message);
-    console.error('Full error:', error);
+    logger.error('Photo upload error', { error: error.message });
+    logger.error('Full error', { error: error.message });
     res.status(500).json({ message: 'Server error: ' + error.message });
   }
 });
@@ -690,8 +736,8 @@ async function listEventPhotos(req, res) {
   try {
     const { eventId } = req.params;
 
-    console.log('\n📸 FETCHING PHOTOS FOR EVENT');
-    console.log('   Event ID:', eventId);
+    logger.info('FETCHING PHOTOS FOR EVENT');
+    logger.info('Event ID', { eventId });
 
     // Get event + organizer (we read AS the organizer)
     const event = await Event.findById(eventId).populate('createdBy');
@@ -699,7 +745,7 @@ async function listEventPhotos(req, res) {
       return res.status(404).json({ message: 'Event not found' });
     }
 
-    console.log('   Event found:', event.title);
+    logger.info('Event found', { title: event.title });
 
     // Check if event has Google Drive folder configured
     if (!event.googleDriveFolderId) {
@@ -720,7 +766,7 @@ async function listEventPhotos(req, res) {
     }
 
     // Fetch photos from Google Drive
-    console.log('📥 Fetching photos from Google Drive...');
+    logger.info('Fetching photos from Google Drive...');
     const allPhotos = await getPhotosFromGoogleDrive({
       folderId: event.googleDriveFolderId,
       accessToken: organizer.googleAccessToken,
@@ -738,7 +784,7 @@ async function listEventPhotos(req, res) {
       return photo.properties?.eventId === eventId;
     });
 
-    console.log(`✅ Retrieved ${allPhotos.length} raw photos, filtered to ${photos.length} for event ${eventId}`);
+    logger.info(`Retrieved ${allPhotos.length} raw photos, filtered to ${photos.length} for event ${eventId}`);
 
     // Format photos for frontend
     const formattedPhotos = photos.map(photo => ({
@@ -746,6 +792,7 @@ async function listEventPhotos(req, res) {
       fileName: photo.name,
       photoCaption: photo.properties?.caption || '',
       uploaderName: photo.properties?.uploaderName || 'Guest',
+      passId: photo.properties?.passId || '',
       uploadedAt: photo.createdTime,
       downloadUrl: photo.webViewLink,
       thumbnailUrl: photo.thumbnailLink || null,
@@ -760,7 +807,7 @@ async function listEventPhotos(req, res) {
     });
 
   } catch (error) {
-    console.error('❌ Error fetching photos:', error.message);
+    logger.error('Error fetching photos', { error: error.message });
     res.status(500).json({ message: 'Server error: ' + error.message });
   }
 }
@@ -817,8 +864,68 @@ router.get('/:eventId/drive-image/:fileId', authenticate, async (req, res) => {
 
     driveResponse.data.pipe(res);
   } catch (error) {
-    console.error('❌ Drive image proxy error:', error.message);
+    logger.error('Drive image proxy error', { error: error.message });
     res.status(500).json({ message: 'Failed to fetch image from Google Drive' });
+  }
+});
+
+// Delete a photo the caller uploaded. Ownership is proven by the pass ID that
+// was stored on the Drive file when it was uploaded, so an attendee can only
+// remove their own photos (organizers may remove any photo on their event).
+router.delete('/:eventId/photos/:fileId', authenticate, async (req, res) => {
+  try {
+    const { eventId, fileId } = req.params;
+    const passId = (req.body?.passId || req.query?.passId || '').toString().trim().toUpperCase();
+
+    const event = await Event.findById(eventId).populate('createdBy');
+    if (!event) return res.status(404).json({ message: 'Event not found' });
+
+    const organizer = event.createdBy;
+    if (!organizer || (!organizer.googleRefreshToken && !organizer.googleAccessToken)) {
+      return res.status(400).json({ message: 'Organizer has not connected Google Drive' });
+    }
+
+    const isOrganizer = req.user.role === 'organizer' &&
+      (organizer._id || organizer).toString() === req.user.id;
+
+    const oauth2Client = getAuthenticatedClient({
+      accessToken: organizer.googleAccessToken,
+      refreshToken: organizer.googleRefreshToken,
+      expiryDate: organizer.googleTokenExpiry,
+      userId: organizer._id
+    });
+    await refreshAndPersistToken(oauth2Client, organizer._id);
+
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
+    // Verify the file belongs to this event before deleting anything.
+    const meta = await drive.files.get({
+      fileId,
+      fields: 'id, properties, trashed'
+    });
+
+    const props = meta.data.properties || {};
+    if (props.eventId !== eventId) {
+      return res.status(404).json({ message: 'Photo not found for this event' });
+    }
+
+    if (!isOrganizer) {
+      const ownerPassId = (props.passId || '').toString().trim().toUpperCase();
+      if (!passId || !ownerPassId || ownerPassId !== passId) {
+        return res.status(403).json({ message: 'You can only delete photos you uploaded.' });
+      }
+    }
+
+    await drive.files.delete({ fileId });
+
+    audit('photo_deleted', { eventId, fileId, by: isOrganizer ? 'organizer' : 'attendee' });
+    res.json({ message: 'Photo deleted successfully', fileId });
+  } catch (error) {
+    logger.error('Photo delete error', { error: error.message });
+    if (error.code === 404) {
+      return res.status(404).json({ message: 'Photo not found' });
+    }
+    res.status(500).json({ message: 'Failed to delete photo. Please try again.' });
   }
 });
 

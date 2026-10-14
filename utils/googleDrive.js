@@ -1,4 +1,5 @@
 const { google } = require('googleapis');
+const logger = require('./logger');
 const { Readable } = require('stream');
 
 /**
@@ -119,7 +120,7 @@ async function refreshAndPersistToken(oauth2Client, userId) {
   const creds = oauth2Client.credentials || {};
 
   if (!creds.refresh_token) {
-    console.warn('⚠️ No refresh token available — cannot refresh access token');
+    logger.warn('No refresh token available — cannot refresh access token');
     return creds.access_token || '';
   }
 
@@ -127,7 +128,7 @@ async function refreshAndPersistToken(oauth2Client, userId) {
   // Google access tokens expire after 3600 seconds (1 hour).
   // Use a 5-minute buffer to avoid edge cases with clock drift.
   if (creds.expiry_date && Date.now() < creds.expiry_date - 5 * 60 * 1000) {
-    console.log('✅ Access token still valid (expires in >5 min) — skipping refresh');
+    logger.info('Access token still valid (expires in >5 min) — skipping refresh');
     return creds.access_token || '';
   }
 
@@ -174,11 +175,11 @@ async function refreshAndPersistToken(oauth2Client, userId) {
         update.googleRefreshToken = credentials.refresh_token;
       }
       await Organizer.findByIdAndUpdate(userId, update);
-      console.log('🔄 Access token refreshed and saved (with expiry) for user', userId);
+      logger.info('Access token refreshed and saved (with expiry) for user', userId);
     }
     return freshToken || '';
   } catch (err) {
-    console.error('❌ Failed to refresh access token:', err.message);
+    logger.error('Failed to refresh access token', { error: err.message });
     // Return the EXISTING token — it might still be valid for a few more
     // minutes. The Drive API call will fail with a clear 401 if the token
     // is truly expired, and the user will see the correct error.
@@ -203,7 +204,7 @@ async function getAccessTokenFromCode(code) {
       expiryDate
     };
   } catch (error) {
-    console.error('Error getting access token:', error.message);
+    logger.error('Error getting access token', { error: error.message });
     return {
       success: false,
       error: error.message
@@ -229,22 +230,23 @@ async function uploadPhotoToGoogleDrive({
   mimeType = 'image/jpeg',
   photoCaption = '',
   uploaderName = 'Guest',
-  eventId = ''
+  eventId = '',
+  passId = ''
 }) {
   try {
-    console.log('📤 Uploading photo to organizer Google Drive...');
-    console.log('   Folder ID:', folderId);
-    console.log('   File name:', fileName);
-    console.log('   Has accessToken:', !!accessToken);
-    console.log('   Has refreshToken:', !!refreshToken);
-    console.log('   Has expiryDate:', !!expiryDate);
+    logger.info('Uploading photo to organizer Google Drive...');
+    logger.info('Folder ID', { folderId });
+    logger.info('File name', { fileName });
+    logger.info('Has accessToken:', !!accessToken);
+    logger.info('Has refreshToken:', !!refreshToken);
+    logger.info('Has expiryDate:', !!expiryDate);
 
     const oauth2Client = getAuthenticatedClient({ accessToken, refreshToken, expiryDate, userId });
 
     // Refresh ONLY if the token is expired (checks expiry_date internally).
     // This prevents the redundant second refresh that caused the 403 bug.
     const refreshed = await refreshAndPersistToken(oauth2Client, userId);
-    console.log('   Token after refresh check: exists=', !!refreshed);
+    logger.info('Token after refresh check: exists=', !!refreshed);
 
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
@@ -256,7 +258,8 @@ async function uploadPhotoToGoogleDrive({
         caption: photoCaption || '',
         uploaderName: uploaderName || 'Guest',
         eventPhoto: 'true',
-        eventId: eventId || ''
+        eventId: eventId || '',
+        passId: passId || ''
       }
     };
 
@@ -269,8 +272,8 @@ async function uploadPhotoToGoogleDrive({
       fields: 'id, name, webViewLink, thumbnailLink, mimeType, size, createdTime'
     });
 
-    console.log('✅ Photo uploaded to Google Drive successfully!');
-    console.log('   File ID:', response.data.id);
+    logger.info('Photo uploaded to Google Drive successfully');
+    logger.info('File ID', { fileId: response.data.id });
 
     return {
       success: true,
@@ -288,8 +291,8 @@ async function uploadPhotoToGoogleDrive({
     const detail = (googleErr && (googleErr.message || googleErr)) ||
       (Array.isArray(error?.errors) && error.errors[0]?.message) ||
       error.message;
-    console.error('❌ Google Drive upload error:', detail);
-    console.error('   Full Google error:', JSON.stringify(error?.response?.data || error.message));
+    logger.error('Google Drive upload error', { detail });
+    logger.error('Full Google error', { detail: JSON.stringify(error?.response?.data || error.message) });
     return {
       success: false,
       error: detail,
@@ -315,13 +318,13 @@ async function getPhotosFromGoogleDrive({ folderId, accessToken, refreshToken, u
       orderBy: 'createdTime desc'
     });
 
-    console.log(`📸 Drive query returned ${response.data.files?.length || 0} photos`);
+    logger.info(`Drive query returned ${response.data.files?.length || 0} photos`);
     return response.data.files || [];
   } catch (error) {
     const googleErr = error?.response?.data?.error;
     const detail = (googleErr && (googleErr.message || googleErr)) ||
       error.message;
-    console.error('❌ Google Drive list error:', detail);
+    logger.error('Google Drive list error', { detail });
     throw new Error(detail);
   }
 }
@@ -351,7 +354,7 @@ async function verifyFolderWriteAccess({ folderId, accessToken, refreshToken, us
     try {
       await drive.files.delete({ fileId: probe.data.id });
     } catch (cleanupErr) {
-      console.warn('⚠️ Failed to clean up probe file:', cleanupErr.message);
+      logger.warn('Failed to clean up probe file', { error: cleanupErr.message });
     }
 
     return { ok: true };

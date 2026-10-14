@@ -10,6 +10,7 @@ node_modules/
 photos/
 
 # Logs
+logs/
 *.log
 npm-debug.log*
 

@@ -45,6 +45,19 @@ router.get('/event/:eventId', authenticate, requireOrganizer, async (req, res) =
       }
     }
 
+    // Backfill passId for any existing Attendee records that are missing one
+    // (e.g. created via the RSVP /info endpoint before passId generation existed).
+    for (const attendee of attendees) {
+      if (!attendee.passId) {
+        try {
+          attendee.passId = crypto.randomBytes(16).toString('hex');
+          await attendee.save();
+        } catch (backfillErr) {
+          logger.error('Failed to backfill passId', { error: backfillErr.message, attendeeId: attendee._id });
+        }
+      }
+    }
+
     res.json(attendees);
   } catch (error) {
     res.status(500).json({ message: error.message });

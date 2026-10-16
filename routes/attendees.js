@@ -193,7 +193,10 @@ router.post('/info', authenticate, async (req, res) => {
 router.post('/checkin/:eventId', authenticate, requireOrganizer, async (req, res) => {
   try {
     const { passId } = req.body;
-    const attendee = await Attendee.findOne({ event: req.params.eventId, passId });
+    const attendee = await Attendee.findOne({ 
+      event: req.params.eventId, 
+      passId: { $regex: new RegExp(`^${passId}$`, 'i') } 
+    });
     
     if (!attendee) return res.status(404).json({ message: 'Attendee not found' });
     

@@ -439,7 +439,7 @@ router.get('/google-callback', async (req, res) => {
               refreshToken: '${refreshToken || ''}',
               expiryDate: ${expiryDate || 'null'}
             }, '*');
-            setTimeout(function () { window.close(); }, 1500);
+            window.close();
           }
         </script>
       </body>

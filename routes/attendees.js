@@ -200,6 +200,10 @@ router.post('/checkin/:eventId', authenticate, requireOrganizer, async (req, res
     
     if (!attendee) return res.status(404).json({ message: 'Attendee not found' });
     
+    if (attendee.status === 'checked-in') {
+      return res.status(400).json({ message: 'Attendee already checked in', attendee });
+    }
+    
     attendee.checkInTime = new Date();
     attendee.status = 'checked-in';
     await attendee.save();

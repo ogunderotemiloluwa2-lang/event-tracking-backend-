@@ -131,10 +131,15 @@ router.put('/:id/checkin', authenticate, requireOrganizer, async (req, res) => {
       return res.status(403).json({ message: 'You can only check in attendees for your own events.' });
     }
 
+    // Idempotent: checking in an already checked-in guest is a success, not an error.
+    if (attendee.status === 'checked-in') {
+      return res.json({ message: 'Already checked in', attendee, alreadyCheckedIn: true });
+    }
+
     attendee.checkInTime = new Date();
     attendee.status = 'checked-in';
     await attendee.save();
-    res.json({ message: 'Checked in successfully', attendee });
+    res.json({ message: 'Checked in successfully', attendee, alreadyCheckedIn: false });
   } catch (error) {
     res.status(400).json({ message: error.message });
   }
@@ -229,7 +234,7 @@ router.post('/checkin/:eventId', authenticate, requireOrganizer, async (req, res
       }
     }
     
-    res.json({ message: 'Checked in successfully', attendee });
+    res.json({ message: 'Checked in successfully', attendee, alreadyCheckedIn: false });
   } catch (error) {
     res.status(400).json({ message: error.message });
   }

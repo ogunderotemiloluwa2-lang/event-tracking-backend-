@@ -193,17 +193,22 @@ router.post('/info', authenticate, async (req, res) => {
 router.post('/checkin/:eventId', authenticate, requireOrganizer, async (req, res) => {
   try {
     const { passId } = req.body;
-    const attendee = await Attendee.findOne({ 
-      event: req.params.eventId, 
-      passId: { $regex: new RegExp(`^${passId}$`, 'i') } 
+    if (!passId) return res.status(400).json({ message: 'Pass ID is required' });
+
+    // Escape regex metacharacters so a pass ID can never be interpreted as a pattern.
+    const escaped = String(passId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const attendee = await Attendee.findOne({
+      event: req.params.eventId,
+      passId: { $regex: new RegExp(`^${escaped}$`, 'i') }
     });
-    
+
     if (!attendee) return res.status(404).json({ message: 'Attendee not found' });
-    
+
+    // Idempotent: checking in an already checked-in guest is a success, not an error.
     if (attendee.status === 'checked-in') {
-      return res.status(400).json({ message: 'Attendee already checked in', attendee });
+      return res.json({ message: 'Already checked in', attendee, alreadyCheckedIn: true });
     }
-    
+
     attendee.checkInTime = new Date();
     attendee.status = 'checked-in';
     await attendee.save();
